@@ -1,0 +1,15 @@
+# وابستگی‌های ربات MedVerse
+# نصب: pip install -r requirements.txt
+
+# کتابخانه‌ی اصلی تلگرام + JobQueue (برای یادآوری‌های کلاس/مطالعه لازمه)
+python-telegram-bot[job-queue]==22.8
+
+# پشتیبانی از پروکسی SOCKS5 -- فقط وقتی PROXY_URL ست بشه استفاده می‌شه،
+# ولی نصبش بی‌ضرره و اگه لازم شد از قبل آماده‌ست.
+httpx[socks]==0.28.1
+
+# خوندن متغیرهای محیطی از فایل .env در اجرای محلی (روی Cloud هم بی‌ضرره)
+python-dotenv==1.0.1
+
+# داده‌های منطقه زمانی برای ZoneInfo روی Railway/Docker
+tzdata

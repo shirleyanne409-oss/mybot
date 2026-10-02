@@ -1,0 +1,24 @@
+[Unit]
+Description=MedVerse Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# اگه یوزر دیگه‌ای غیر از medverse ساختی، اینجا و پایین اصلاحش کن
+User=medverse
+WorkingDirectory=/home/medverse/MedVerse
+EnvironmentFile=/home/medverse/MedVerse/.env
+ExecStart=/home/medverse/MedVerse/venv/bin/python /home/medverse/MedVerse/bot.py
+Restart=always
+RestartSec=5
+
+# جلوگیری از مصرف بی‌رویه‌ی حافظه روی VM کوچیک (اختیاری، در صورت نیاز تغییرش بده)
+MemoryMax=700M
+
+# لاگ‌ها با journalctl -u medverse-bot -f قابل مشاهده‌ن
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

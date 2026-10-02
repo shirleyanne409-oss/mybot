@@ -1,0 +1,638 @@
+{
+  "فیزیوپات ۱": {
+    "پاتولوژی": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANGanIHPCjIxR9FRgEH_WtiPEVrDQ4AAmwdAAJMw5FT6nX40VF84wk9BA",
+              "caption": "جزوه عملی",
+              "downloads": 1,
+              "fid": "f13d1df5"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgEAAxkBAAICAmp026G2LiJzL99epXeHiBitlzFtAAICAQACl_sRR_U3lglWXvucPQQ",
+              "caption": "Robin's Shortened.pdf",
+              "downloads": 0,
+              "fid": "d27acdcb"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEPmp2w1Pp6UNSjSfI4FhgcfG1jggLAALxGAACRO0oUzT3pLZKfDgePQQ",
+              "caption": "Ch1-Cell (1).ppt",
+              "downloads": 0,
+              "fid": "31c0784b"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEQmp2w24sMgcc263cXGSbbbeE0giAAALkHAAC-9ZwU-V-PVwUQV-WPQQ",
+              "caption": "Ch2-Inflam.ppt",
+              "downloads": 0,
+              "fid": "c996d71f"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIERmp2w4gIPfLFIDQ58WzeKGGvnNdNAAKnHQACHFnBU56MCh6JkpXNPQQ",
+              "caption": "Ch3-Regen.ppt",
+              "downloads": 0,
+              "fid": "4363ff7e"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIESGp2w5YOClXRigWlbexQ-RzVniztAAKoHQACHFnBU79GYY_3LDOWPQQ",
+              "caption": "Ch4-Hemodyn.ppt",
+              "downloads": 0,
+              "fid": "ce0e0e2b"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIET2p2xEWYR2-efftd6Xk8ppfWKZJZAAIUHAACtPoxUIi6UxPpaCiJPQQ",
+              "caption": "Ch6-Immune.ppt",
+              "downloads": 0,
+              "fid": "a9110b8f"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEU2p2xF6xkPp7HJrqJX21Ra_AF5sVAAIXHAACtPoxUFkSgSuYu8zUPQQ",
+              "caption": "Ch7-Neoplasm.ppt",
+              "downloads": 0,
+              "fid": "64fdc530"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEV2p2xHplW080g04uX_SxnqgccjI8AAI1GgACtOrwUFXVHMXHcd3CPQQ",
+              "caption": "Ch8-Infectious.ppt",
+              "downloads": 0,
+              "fid": "986653d7"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEW2p2xJabtjqziqXxUzwWdzSU1oNNAAI2GgACtOrwUJBzYzpfDxtKPQQ",
+              "caption": "Ch9-EnvNut.ppt",
+              "downloads": 0,
+              "fid": "fd2be67a"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAIEZ2p2xXpkPiNEXqo-AvO6cPAQJqW8AAKUGQACE925U_cBv4V_DuTVPQQ",
+              "caption": "Ch1-Cell.ppt",
+              "downloads": 0,
+              "fid": "4c56c2d7"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANOanIH_stIQCTCQ0DvXujlpf1nulcAAm4dAAJMw5FTWmAWnqiDPLk9BA",
+              "caption": "سیب‌سبز",
+              "fid": "386e1ac4"
+            }
+          ]
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANKanIHVwGlhmOGs69eNDbfkUpA5DIAAm0dAAJMw5FTVuQ4pOkt5xA9BA",
+              "caption": "نمونه‌سوال",
+              "fid": "4c32a412"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANSanIIG4OBVllXCcNPO4sDF1Y7ZtIAAm8dAAJMw5FT9UxK45_rTt09BA",
+              "caption": "نکات مهم",
+              "fid": "72aace8e"
+            }
+          ]
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": []
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "فارماکولوژی": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANmanIJuDsM8yzL7qA8lMm3pUVZoxUAAnUdAAJMw5FTpdUxwIf1ivQ9BA",
+              "caption": "پاور",
+              "downloads": 1,
+              "fid": "c6076d84"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEM2p2wIPqx48V2cDh9Y4dNV3ekPuNAAJvHgACBMGwU0HygR9BU54ePQQ",
+              "caption": "جزوات فارما.zip",
+              "downloads": 0,
+              "fid": "77a4e3be"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEM2p2wIPqx48V2cDh9Y4dNV3ekPuNAAJvHgACBMGwU0HygR9BU54ePQQ",
+              "caption": "جزوات فارما.zip",
+              "downloads": 0,
+              "fid": "e49750fc"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANqanIJ0RhJeb4pEeLpWek8vKgHkAQAAnYdAAJMw5FTJa6GXoEa-6w9BA",
+              "caption": "نمونه‌سوال",
+              "fid": "e3fc1e2e"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAIDsmp2FFKQh7D0Ed0qJ2J1akns-iDmAAK-GwACE92xU3iO-662Zd8_PQQ",
+              "caption": "StudyGuide_فارماکولوژی",
+              "downloads": 0,
+              "fid": "4c3b3981"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "ژنتیک": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANeanIJQ2YnAkiR7-WgE_KrpLJ_r-YAAnIdAAJMw5FTsRfzoF9uJIA9BA",
+              "caption": "جزوه و پاور",
+              "fid": "5b385f92"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANianIJeA-fc8l5w-QaR_VI6orRiLoAAnQdAAJMw5FTfGDIvl0V9iU9BA",
+              "caption": "نمونه‌سوال",
+              "fid": "ea652397"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAIDt2p2FHkkwnEPMECXUIUAATkDtGrAQgACvxsAAhPdsVO-SKPoSHgQoT0E",
+              "caption": "StudyGuide_ژنتیک",
+              "downloads": 0,
+              "fid": "57062522"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "تغذیه": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANWanIIa-F0RoCUuuwQk5II9HvQhu8AAnAdAAJMw5FTXU4S245fcHg9BA",
+              "caption": "جزوات تغذیه.zip",
+              "downloads": 1,
+              "fid": "4414a5b3"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANaanIIvTWTbFYsWDzA-_w5Ai5AvAsAAnEdAAJMw5FTT9JJYz4jkBc9BA",
+              "caption": "نمونه‌سوال",
+              "fid": "537c3bb8"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAIDvmp2FMDX64AEScvyEXUZs9b4bP7HAALAGwACE92xU8DwXZjc8d2_PQQ",
+              "caption": "StudyGuide_تغذیه",
+              "downloads": 0,
+              "fid": "cd05f376"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "جراحی": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAOSanIQbq6PQT53XEelCg0K1L61mxMAAoYdAAJMw5FTIhLElzxHdUA9BA",
+              "caption": "پاور",
+              "fid": "d558f29e"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAOWanIQjgs2v9y7-rvvFiEB7LtwmssAAocdAAJMw5FT5R2-x0TY0Hk9BA",
+              "caption": "نمونه‌سوال",
+              "fid": "673038e2"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": []
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "روان": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAANuanIKy4_wb2cShQUzVzkSRCyRIUMAAnodAAJMw5FTBFw02OwyqrE9BA",
+              "caption": "پاور",
+              "fid": "2e635751"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIEX2p2xLEc4wOVJ9k7QXa9vUxLTvQXAAK-HgACoGaBUWgzE6cvG7DsPQQ",
+              "caption": "psychiatric_history_taking.pptx",
+              "downloads": 0,
+              "fid": "d623a69d"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIBu2p01UgoFLpUteu1hW9Izcpf8RlVAAKEHAACInagU2xctbOj9m8ePQQ",
+              "caption": "خلاصه+ نمونه‌سوال تمرینی.pdf",
+              "downloads": 0,
+              "fid": "2b67f4b0"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIBu2p01UgoFLpUteu1hW9Izcpf8RlVAAKEHAACInagU2xctbOj9m8ePQQ",
+              "caption": "خلاصه+ نمونه‌سوال تمرینی.pdf",
+              "downloads": 0,
+              "fid": "94319345"
+            }
+          ]
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIBwGp01V7HtdyMypUzRZ_Fnqj2rWsWAALuHAACWGioU5Ivv02T1SMkPQQ",
+              "caption": "نمونه‌سوال روان.pdf",
+              "downloads": 0,
+              "fid": "e69bfeaa"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": []
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "عفونی": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAOCanIMs8Lthr11Rvmne2NlP_YnhFIAAoEdAAJMw5FTvxOcr9rcFic9BA",
+              "caption": "جزوه و پاور دکتر خراشادی‌زاده",
+              "fid": "40ad5d32"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAOGanINJcwwytXWYPeQb9zvq6ReyzAAAoMdAAJMw5FT198SvG82P-M9BA",
+              "caption": "پاور و جزوه استاد شریفی‌فر",
+              "fid": "4e5e699e"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAOKanINXIi8RhTowU1RBAYFOhbOOggAAoQdAAJMw5FT4lI5TL28tEs9BA",
+              "caption": "پاور و جزوه استاد عظیمی",
+              "fid": "9a3db9c5"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAOOanIQHleDldYZ9wmTY_fANBuFEQQAAoUdAAJMw5FTOQOJMeA7O2c9BA",
+              "caption": "جزوه و پاور استاد گلشا",
+              "fid": "beb2707e"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAN-anIMB7t2e1tZ0MQDLgkSiSsE35cAAn8dAAJMw5FTrJpJsIcQPZs9BA",
+              "caption": "نمونه‌سوال",
+              "fid": "8634e4e5"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAIDxWp2FPSwdAyVTW6xEL5B5voiDVm2AALBGwACE92xU3IGguWHf55FPQQ",
+              "caption": "StudyGuide_عفونی",
+              "downloads": 0,
+              "fid": "97d23cff"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "اطفال": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAN2anILfuq3_gs8Ayt3cmFBga30Md0AAnwdAAJMw5FT4MWcZvjVySk9BA",
+              "caption": "پاور و جزوه",
+              "downloads": 1,
+              "fid": "2fed6323"
+            },
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIBI2p0bqXW0YEXgNp5wdBy1uPyuAU7AALfGwACWGioU27uGfTRbZ-vPQQ",
+              "caption": "جزوات دکتر عنایت.zip",
+              "downloads": 0,
+              "fid": "68a3051b"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAN6anILokVxp8jWvZ7_0x2FEmV4DSwAAn0dAAJMw5FTPDq4hW4S73g9BA",
+              "caption": "نمونه‌سوال",
+              "fid": "c45199ef"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAIDzWp2FUHBYi1YNNH-Xg5bl0G-CAOlAALCGwACE92xU_KuwA5ZD5T2PQQ",
+              "caption": "StudyGuide_اطفال",
+              "downloads": 0,
+              "fid": "6679ae97"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "اپید": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": []
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": []
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAID0mp2FX9e9QQgOdvfrJc8aQ0w0HpPAALDGwACE92xU4O9Xd_14iNrPQQ",
+              "caption": "StudyGuide_اپید",
+              "downloads": 0,
+              "fid": "878e7772"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAIB-Wp02p7-lucRsZSf71wfRlzN4lALAAKSGQACwwVJUz2k-AsvDHjSPQQ",
+              "caption": "آزمونهای_تمرینی_اپیدمیولوژی_و_آمار_حیاتی.pdf",
+              "downloads": 1,
+              "fid": "b6ca576a"
+            }
+          ]
+        }
+      }
+    },
+    "دانش خانواده": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": []
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": []
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAID22p2Fbr70A2MU5pdRL4QIjEgk3l1AALEGwACE92xUz3CrDNvx2kiPQQ",
+              "caption": "StudyGuide_دانش خانواده",
+              "downloads": 0,
+              "fid": "4c482388"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "حوادث و بلایا": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAM-anIG38tTGG4uoeBKNTn2B9ca6SQAAmodAAJMw5FTzCSgy4qTYbw9BA",
+              "caption": "پاور",
+              "fid": "c26ef15d"
+            }
+          ]
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkBAAMQanICJGM32IB7Le9LGm1UPUh_dVEAAlodAAJMw5FTJ2XbVNY6dnc9BA",
+              "caption": "نمونه‌سوال پایان‌ترم",
+              "fid": "6e201482"
+            }
+          ]
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAID4Gp2FdzlWeBYiEnvOglWqLbcfLPSAALFGwACE92xU-IY6fFJaDAmPQQ",
+              "caption": "StudyGuide_حوادث و بلایا",
+              "downloads": 0,
+              "fid": "e45a4257"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    },
+    "فرهنگ و تمدن": {
+      "guide": "",
+      "categories": {
+        "📖 منابع اصلی": {
+          "files": []
+        },
+        "📝 خلاصه‌ها": {
+          "files": []
+        },
+        "❓ نمونه سوالات": {
+          "files": []
+        },
+        "⭐️ نکات امتحانی": {
+          "files": []
+        },
+        "🩺 تجربه امتحان دانشجویان": {
+          "files": [
+            {
+              "type": "file",
+              "file_id": "BQACAgQAAxkDAAID6Gp2FjMi4M5UfLezKp_vbyVFlUv4AALGGwACE92xU0B3Bh7orgJpPQQ",
+              "caption": "StudyGuide_فرهنگ و تمدن",
+              "downloads": 0,
+              "fid": "6c66456a"
+            }
+          ]
+        },
+        "📂 فایل‌های تکمیلی": {
+          "files": []
+        }
+      }
+    }
+  },
+  "فیزیوپات ۲": {},
+  "فیزیوپات ۳": {}
+}

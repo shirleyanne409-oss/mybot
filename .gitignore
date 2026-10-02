@@ -1,0 +1,22 @@
+.env
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Runtime / persistent data: keep these in Railway Volume, not GitHub
+medverse.db
+*.db-wal
+*.db-shm
+backups/
+*.tar.gz
+analytics.json
+pending_submissions.json
+requests.json
+class_schedule.json
+class_exceptions.json
+fixed_events.json
+personal_schedule.json
+reminder_log.json
+users.json
+subscribers.json
