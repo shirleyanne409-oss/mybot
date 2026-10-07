@@ -1,0 +1,42 @@
+MedVerse + ZarinPal setup
+=========================
+
+Files:
+- bot.py      (replace current bot.py)
+- db.py       (replace current db.py)
+- payment.py  (new file; put next to bot.py and db.py)
+
+No new Python dependency is required. The implementation uses httpx, which the current bot already uses.
+
+Railway environment variables:
+1) ZARINPAL_MERCHANT_ID=<your 36-character merchant id>
+2) PAYMENT_BASE_URL=https://YOUR-PUBLIC-RAILWAY-DOMAIN
+3) PAYMENT_SIGNING_SECRET=<a long random secret>
+
+Keep the existing variables unchanged, especially:
+- BOT_TOKEN
+- ADMIN_IDS
+- MEDVERSE_DATA_DIR=/data
+- MEDVERSE_DB_FILE=/data/medverse.db
+
+Railway networking:
+- Generate/enable a public domain for the same service.
+- PAYMENT_BASE_URL must be that HTTPS domain, without a trailing slash.
+- Railway normally supplies PORT automatically; do not hardcode PORT unless needed.
+
+Public support link for a Telegram channel:
+https://YOUR-PUBLIC-RAILWAY-DOMAIN/support
+
+Bot behavior:
+- The existing ⭐ حمایت مالی menu remains.
+- When ZarinPal variables are configured, users see 50k / 100k / 200k / 500k toman choices.
+- Each bot-user payment link is HMAC-signed.
+- Payment records are stored in support_payments (amounts in IRR).
+- Callback Status=OK is never trusted by itself; the server calls ZarinPal verify.
+- Verify code 100 or 101 marks the payment paid.
+- Successful linked payments automatically add the Telegram user to supporters.
+- The bot sends the supporter a confirmation message.
+- The old /supportlink, /supportoff, /addsupporter and /removesupporter fallback/admin commands remain available.
+
+Start command stays:
+python bot.py
