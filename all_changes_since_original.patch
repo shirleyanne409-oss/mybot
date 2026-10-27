@@ -1,0 +1,3688 @@
+--- proj/mybot-main/bot.py	2026-10-25 05:09:17.000000000 +0000
++++ work/mybot-main/bot.py	2026-10-27 09:52:01.821392859 +0000
+@@ -32,6 +32,7 @@
+ """
+ 
+ import asyncio
++import html
+ import io
+ import sqlite3
+ import json
+@@ -40,6 +41,7 @@
+ import re
+ import sys
+ import uuid
++from urllib.parse import quote as _urlquote
+ from datetime import datetime, timedelta
+ from zoneinfo import ZoneInfo
+ import httpx
+@@ -50,6 +52,8 @@
+ import ai_experience
+ import mafia
+ import payment
++import zipper
++import market
+ from telegram import (
+     InlineKeyboardButton,
+     InlineKeyboardMarkup,
+@@ -191,7 +195,11 @@
+ # برچسبِ قبلیِ همین دکمه: کیبوردِ منوی اصلیِ بعضی کاربرها تا اولین بروزرسانی هنوز اینو می‌فرسته
+ LEGACY_MENU_STUDY_GROUP = "👥 مطالعه گروهی"
+ MENU_CHAT = "💬 گپ دانشجویی"
++# مرحله‌ی اول حذفِ بخش «گفت‌وگو و بازی»: فقط دسترسیِ کاربران بسته می‌شود. هیچ جدول/رکورد/کدی
++# پاک نشده؛ برای برگرداندنِ بخش کافیه این پرچم True شود.
++CHAT_SECTION_ENABLED = False
+ MENU_SUPPORT = "⭐ حمایت مالی"
++MENU_MARKET = "📚 بازارچه کتاب و جزوه"
+ 
+ # دلایل استاندارد گزارش پیام در گپ دانشجویی
+ CHAT_REPORT_REASONS = [
+@@ -223,7 +231,7 @@
+ FIXED_EVENTS_FILE = _data_path("fixed_events.json")
+ PERSONAL_SCHEDULE_FILE = _data_path("personal_schedule.json")
+ REMINDER_LOG_FILE = _data_path("reminder_log.json")
+-REMINDER_LEAD_MINUTES = 10  # چند دقیقه قبل از شروع کلاس رسمی یادآوری بفرسته
++REMINDER_LEAD_MINUTES = 15  # چند دقیقه قبل از شروع کلاس رسمی یادآوری بفرسته (قبلاً ۱۰)
+ REMINDER_CATCHUP_MINUTES = 10  # اگر Job/سرور کمی عقب افتاد، یادآوری تا این مدت از دست نره
+ 
+ # منطقه‌ی زمانیِ صریح برای کل سیستم برنامه‌کلاسی/یادآوری. عمداً هاردکد شده تا
+@@ -766,6 +774,10 @@
+ ]
+ 
+ # دسته‌هایی که به‌جای ✅/◻️ وضعیتِ «فعال/غیرفعال» رو صریح توی متنِ دکمه نشون می‌دن
++if not CHAT_SECTION_ENABLED:
++    # دسته‌های اعلانِ گپ فعلاً بی‌معنی‌اند؛ فقط از منو پنهان می‌شوند (تنظیمِ ذخیره‌شده‌ی کاربران دست‌نخورده می‌ماند).
++    NOTIFY_ORDER = [k for k in NOTIFY_ORDER if k not in ("exam_chat", "casual_chat")]
++
+ NOTIFY_STATUS_LABELS = {
+     "study_room": ("🔔 اعلان اتاق مطالعه: فعال", "🔕 اعلان اتاق مطالعه: غیرفعال"),
+ }
+@@ -810,7 +822,8 @@
+             [KeyboardButton(MENU_COURSES), KeyboardButton(MENU_NOTIFY)],
+             [KeyboardButton(MENU_PARTICIPATE), KeyboardButton(MENU_ABOUT)],
+             [KeyboardButton(MENU_SCHEDULE), KeyboardButton(MENU_STUDY_GROUP)],
+-            [KeyboardButton(MENU_CHAT), KeyboardButton(MENU_SUPPORT)],
++            ([KeyboardButton(MENU_CHAT), KeyboardButton(MENU_SUPPORT)] if CHAT_SECTION_ENABLED
++             else [KeyboardButton(MENU_MARKET), KeyboardButton(MENU_SUPPORT)]),
+         ],
+         resize_keyboard=True,
+     )
+@@ -1522,6 +1535,66 @@
+             pass
+ 
+ 
++def schedule_channel_publish(context: ContextTypes.DEFAULT_TYPE, fid: str) -> None:
++    """بعد از ثبتِ موفقِ فایل در DB، انتشارِ خودکار در کانال آرشیو را در پس‌زمینه شروع می‌کند.
++    خطا هیچ‌وقت جلوی کارِ اصلی را نمی‌گیرد؛ فایل در DB سالم می‌ماند و با /retrychannel قابل تلاش مجدد است."""
++    if not fid:
++        return
++
++    async def _job() -> None:
++        try:
++            result = await channelexport.publish_one(context.bot, fid)
++        except Exception:
++            logger.exception("انتشارِ خودکارِ فایل در کانال با خطا مواجه شد (fid=%s)", fid)
++            result = "failed"
++        if result == "failed":
++            for admin_id in get_super_admin_ids():
++                try:
++                    await context.bot.send_message(
++                        chat_id=admin_id,
++                        text=f"⚠️ انتشارِ فایل (شناسه {fid}) در کانال آرشیو ناموفق بود. فایل در ربات سالم است؛ "
++                             "بعد از رفع مشکل (مثلاً ادمین‌بودنِ ربات در کانال) با /retrychannel دوباره تلاش کن.",
++                    )
++                except Exception:
++                    pass
++
++    context.application.create_task(_job())
++
++
++async def retry_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """/retrychannel -- فقط SUPER_ADMIN: دوباره تلاش برای فایل‌هایی که انتشارشان ناموفق بود."""
++    if not is_super_admin(update.effective_user.id):
++        return
++    if channelexport.is_running():
++        await update.message.reply_text("⏳ export سراسری در حال اجراست؛ بعد از پایانش دوباره بزن.")
++        return
++    fids = channelexport.failed_fids()
++    if not fids:
++        await update.message.reply_text("✅ فایلِ ناموفقی در صفِ انتشار نیست.")
++        return
++    await update.message.reply_text(f"🔁 تلاش مجدد برای {len(fids)} فایل شروع شد؛ نتیجه را همین‌جا می‌فرستم.")
++    chat_id = update.effective_chat.id
++
++    async def _job() -> None:
++        ok = bad = 0
++        for fid in fids:
++            try:
++                r = await channelexport.publish_one(context.bot, fid)
++            except Exception:
++                logger.exception("retrychannel fid=%s", fid)
++                r = "failed"
++            if r in ("sent", "already"):
++                ok += 1
++            else:
++                bad += 1
++        try:
++            await context.bot.send_message(chat_id=chat_id, text=f"🔁 نتیجه: ✅ {ok} | ⚠️ هنوز ناموفق: {bad}")
++        except Exception:
++            pass
++
++    context.application.create_task(_job())
++
++
+ async def _broadcast_lifecycle_message(app: Application, text: str, label: str, recipients) -> None:
+     """پیام کوتاهِ روشن/خاموش شدنِ ربات رو به لیستِ گیرندگانِ داده‌شده، به‌صورت بی‌صدا
+     (زنگوله، بدون نوتیفِ کامل) می‌فرسته. recipients توسط تابعِ صداکننده مشخص می‌شه
+@@ -1779,6 +1852,15 @@
+             )
+         return
+ 
++    pending_share = context.user_data.pop("pending_start_deeplink", None)
++    if pending_share:
++        if not await open_shared_deeplink(context, query.message.chat_id, pending_share):
++            await context.bot.send_message(
++                chat_id=query.message.chat_id,
++                text="این لینک پیدا نشد یا دیگه معتبر نیست.",
++            )
++        return
++
+     await proceed_after_join(context, query.message.chat_id, user_id, update.effective_user.first_name)
+ 
+ 
+@@ -2219,6 +2301,8 @@
+     payload = context.args[0].strip() if context.args else ""
+     if payload.startswith("file_"):
+         context.user_data["pending_file_deeplink"] = payload[5:].strip()
++    elif payload.startswith(SHARE_DEEPLINK_PREFIXES):
++        context.user_data["pending_start_deeplink"] = payload
+ 
+     if not has_joined_channel(user_id):
+         await send_join_prompt(context, update.effective_chat.id)
+@@ -2231,6 +2315,12 @@
+             await update.message.reply_text("این فایل پیدا نشد یا دیگه در دسترس نیست.")
+         return
+ 
++    if payload.startswith(SHARE_DEEPLINK_PREFIXES):
++        context.user_data.pop("pending_start_deeplink", None)
++        if not await open_shared_deeplink(context, update.effective_chat.id, payload):
++            await update.message.reply_text("این لینک پیدا نشد یا دیگه معتبر نیست (ممکنه محتوا حذف یا لینک لغو شده باشد).")
++        return
++
+     users = load_users()
+     entry = users.get(str(user_id), {})
+     if not entry.get("nickname_asked"):
+@@ -2324,6 +2414,13 @@
+ 
+ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+     text = update.message.text
++    # هر دکمه‌ی منوی اصلی، حالتِ گفت‌وگو/ویزاردِ بازارچه را می‌بندد (تا متنِ بعدی ناخواسته رله نشود)
++    market.clear_state(context)
++
++    if text == MENU_MARKET:
++        track_section("market")
++        await market.show_root(update, context)
++        return
+ 
+     if text == MENU_COURSES:
+         track_section("courses")
+@@ -2458,26 +2555,85 @@
+ 
+ 
+ def can_send_study_invite(user_id: int) -> bool:
+-    """چه کسی می‌تونه دعوتِ سراسری بفرسته. الان: هر سطحی از ادمین (همون مجوزهای
+-    مدیریتیِ فعلی). اگه خواستی دانشجوها هم بتونن، فقط همین تابع رو عوض کن."""
+-    return is_admin(user_id)
++    """ارسالِ لینکِ «اتاق رسمی» (برای همه یا یک ترم): فقط سوپرادمین. ادمینِ ترم اتاقِ رسمی نمی‌سازد/
++    لینکِ رسمی را سراسری نمی‌فرستد؛ اطلاعیه‌ی ترمِ خودش را با مجوزِ study_announce می‌فرستد."""
++    return is_super_admin(user_id)
++
++
++def can_send_study_announce(user_id: int) -> bool:
++    return is_admin(user_id) and dbmod.has_admin_permission(user_id, "study_announce")
++
++
++def _study_notify_button(enabled: bool) -> InlineKeyboardButton:
++    """دکمه‌ی خاموش/روشن‌کردنِ اعلانِ اتاق مطالعه. از همان کلیدِ «study_room» در
++    تنظیماتِ 🔔 اطلاع‌رسانی استفاده می‌کند (هیچ تنظیمِ موازی‌ای وجود ندارد)."""
++    if enabled:
++        return InlineKeyboardButton("🔕 دیگر این اعلان را دریافت نکن", callback_data="studyroom_notify:off")
++    return InlineKeyboardButton("🔔 دریافتِ اعلان‌های اتاق مطالعه", callback_data="studyroom_notify:on")
+ 
+ 
+ def study_room_markup(user_id: int) -> InlineKeyboardMarkup:
+     rows = [[InlineKeyboardButton("🚪 ورود به اتاق مطالعه", url=STUDY_ROOM_LINK)]]
++    rows.append([InlineKeyboardButton("⏰ بازه‌های مطالعه‌ی امروز", callback_data="sslot_list")])
++    rows.append([InlineKeyboardButton("🏠 اتاق مطالعه‌ی شخصی من", callback_data="proom_start")])
++    rows.append([_study_notify_button(bool(get_notify_prefs(user_id).get("study_room")))])
+     if can_send_study_invite(user_id):
+-        rows.append([InlineKeyboardButton("📣 دعوت به مطالعه", callback_data="studyinv_start")])
++        rows.append([InlineKeyboardButton("📣 دعوت به مطالعه (اتاق رسمی)", callback_data="studyinv_start")])
++    if can_send_study_announce(user_id):
++        rows.append([InlineKeyboardButton("📢 اطلاعیه‌ی اتاق مطالعه", callback_data="studyann_start")])
+     return InlineKeyboardMarkup(rows)
+ 
+ 
+ def _study_invite_invitation_markup() -> InlineKeyboardMarkup:
+-    return InlineKeyboardMarkup([[InlineKeyboardButton("🚪 ورود به اتاق مطالعه", url=STUDY_ROOM_LINK)]])
++    # گیرنده‌ی این پیام فقط کسی است که اعلان اتاق مطالعه را روشن دارد؛ پس دکمه‌ی «خاموش» نمایش داده می‌شود.
++    return InlineKeyboardMarkup([
++        [InlineKeyboardButton("🚪 ورود به اتاق مطالعه", url=STUDY_ROOM_LINK)],
++        [_study_notify_button(True)],
++    ])
+ 
+ 
+-def _study_invite_recipients(sender_id: int) -> list:
++async def study_room_notify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """studyroom_notify:off|on -- فقط کلیدِ «study_room» همین کاربر را تغییر می‌دهد (ذخیره‌ی دائمی در DB)."""
++    query = update.callback_query
++    user_id = update.effective_user.id
++    action = query.data.split(":", 1)[1]
++    if action not in ("on", "off"):
++        await query.answer()
++        return
++    enable = action == "on"
++    try:
++        set_notify_pref(user_id, "study_room", enable)
++    except Exception:
++        logger.exception("تغییرِ اعلانِ اتاق مطالعه ناموفق بود (user=%s)", user_id)
++        await query.answer("مشکلی پیش اومد، دوباره امتحان کن 🙏", show_alert=True)
++        return
++    await query.answer(
++        "🔔 اعلان‌های اتاق مطالعه دوباره فعال شد." if enable
++        else "🔕 دیگه این اعلان رو دریافت نمی‌کنی. هر وقت خواستی از «🔔 اطلاع‌رسانی» یا همین دکمه فعالش کن.",
++        show_alert=not enable,
++    )
++    # فقط ردیفِ دکمه‌ی اعلان عوض می‌شود؛ بقیه‌ی دکمه‌های پیام (لینک ورود، دعوت به مطالعه) دست‌نخورده می‌مانند.
++    try:
++        old_rows = query.message.reply_markup.inline_keyboard if query.message and query.message.reply_markup else []
++        new_rows = []
++        for row in old_rows:
++            if any((b.callback_data or "").startswith("studyroom_notify:") for b in row):
++                new_rows.append([_study_notify_button(enable)])
++            else:
++                new_rows.append(list(row))
++        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
++    except TelegramError:
++        pass
++
++
++def _study_invite_recipients(sender_id: int, scope=None) -> list:
+     """گیرنده‌ها: فقط کاربرانی که اعلان اتاق مطالعه رو روشن دارن (چکِ واقعیِ تنظیم
+-    زنگوله، هر بار موقعِ ساختِ لیست)، بدونِ خودِ فرستنده."""
+-    return [uid for uid in dbmod.get_users_for_notify("study_room") if int(uid) != int(sender_id)]
++    زنگوله، هر بار موقعِ ساختِ لیست)، بدونِ خودِ فرستنده. scope: None=همه‌ی ترم‌ها یا نامِ یک ترم."""
++    users = [uid for uid in dbmod.get_users_for_notify("study_room") if int(uid) != int(sender_id)]
++    if scope is not None:
++        in_term = {int(u) for u in dbmod.get_user_ids_for_term(scope)}
++        users = [uid for uid in users if int(uid) in in_term]
++    return users
+ 
+ 
+ def _study_invite_cooldown_left() -> int:
+@@ -2505,7 +2661,31 @@
+         )
+         return
+ 
+-    count = len(_study_invite_recipients(user_id))
++    scopes = [None] + list(admin_allowed_programs(user_id))
++    context.user_data["study_invite_scopes"] = scopes
++    scope_buttons = [
++        [InlineKeyboardButton("🌍 همه‌ی ترم‌ها" if sc is None else sc, callback_data=f"studyinv_scope:{i}")]
++        for i, sc in enumerate(scopes)
++    ]
++    await query.message.reply_text("دعوت به اتاق رسمی برای کدام ترم ارسال شود؟", reply_markup=InlineKeyboardMarkup(scope_buttons))
++
++
++async def study_invite_scope_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    if not can_send_study_invite(user_id):
++        await query.answer("⛔️ این گزینه فقط برای سوپرادمینه.", show_alert=True)
++        return
++    await query.answer()
++    scopes = context.user_data.get("study_invite_scopes") or []
++    try:
++        scope = scopes[int(query.data.split(":", 1)[1])]
++    except (ValueError, IndexError):
++        await query.edit_message_text("این درخواست منقضی شده؛ دوباره از «📣 دعوت به مطالعه» شروع کن.")
++        return
++    context.user_data["study_invite_scope"] = scope
++    count = len(_study_invite_recipients(user_id, scope))
++    scope_label = "همه‌ی ترم‌ها" if scope is None else scope
+     nonce = uuid.uuid4().hex[:10]
+     context.user_data["study_invite_nonce"] = nonce
+     preview = (
+@@ -2513,6 +2693,7 @@
+         "──────────────\n"
+         f"{STUDY_ROOM_TEXT}\n"
+         "──────────────\n"
++        f"🎯 مخاطبان: <b>{html.escape(scope_label)}</b>\n"
+         f"👥 مخاطبانِ احتمالی: <b>{count}</b> نفر (کسانی که اعلان اتاق مطالعه رو روشن دارن)\n\n"
+         "با «✅ تأیید و ارسال» این پیام برای همه‌ی اون‌ها فرستاده می‌شه."
+     )
+@@ -2520,7 +2701,7 @@
+         InlineKeyboardButton("✅ تأیید و ارسال", callback_data=f"studyinv_ok:{nonce}"),
+         InlineKeyboardButton("✖️ انصراف", callback_data="studyinv_cancel"),
+     ]]
+-    await query.message.reply_text(
++    await query.edit_message_text(
+         preview, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True
+     )
+ 
+@@ -2558,7 +2739,7 @@
+     dbmod.set_study_invite_last_sent(_time.time())
+     await query.answer("ارسال شروع شد…")
+ 
+-    recipients = _study_invite_recipients(user_id)
++    recipients = _study_invite_recipients(user_id, context.user_data.pop("study_invite_scope", None))
+     try:
+         await query.edit_message_text(f"📤 ارسالِ دعوت برای {len(recipients)} نفر شروع شد؛ نتیجه رو همین‌جا می‌فرستم.")
+     except TelegramError:
+@@ -2627,6 +2808,982 @@
+             logger.exception("ارسالِ گزارشِ نتیجه به درخواست‌کننده ناموفق بود.")
+ 
+ 
++# ============================================================
++# 🚫 بخش «گفت‌وگو و بازی» (گپ دانشجویی، نظرسنجی، مافیا) -- غیرفعال برای کاربران
++# گیتِ زودتر از همه‌ی هندلرها (group=-2). با CHAT_SECTION_ENABLED=True غیرفعال می‌شود.
++# ============================================================
++
++_CHAT_DISABLED_TEXT = "این بخش فعلاً غیرفعال شده است. 🌱"
++_CHAT_REPLY_BUTTONS = {
++    MENU_CHAT, CHAT_EXIT_BUTTON, CHAT_IDENTITY_TOGGLE_BUTTON, CHAT_POLL_BUTTON, CHAT_GAME_BUTTON,
++    _LEGACY_CHAT_RANDOM_TOPIC_BUTTON,
++}
++_CHAT_CALLBACK_PREFIXES = ("chat", "mf:", "mfn:", "mfv:")
++
++
++async def chat_disabled_message_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    if CHAT_SECTION_ENABLED:
++        return
++    msg = update.effective_message
++    if msg is None:
++        return
++    text = (msg.text or "").strip()
++    in_room = any(context.user_data.get(k) for k in ("active_chat_room", "chat_edit_pending", "poll_new"))
++    if text in _CHAT_REPLY_BUTTONS or text.startswith("/chatadmin") or in_room:
++        for k in ("active_chat_room", "chat_edit_pending", "poll_new"):
++            context.user_data.pop(k, None)
++        await msg.reply_text(_CHAT_DISABLED_TEXT, reply_markup=main_menu_keyboard())
++        raise ApplicationHandlerStop
++
++
++async def chat_disabled_callback_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    if CHAT_SECTION_ENABLED:
++        return
++    query = update.callback_query
++    if query is not None and (query.data or "").startswith(_CHAT_CALLBACK_PREFIXES):
++        await query.answer(_CHAT_DISABLED_TEXT, show_alert=True)
++        raise ApplicationHandlerStop
++
++
++# ============================================================
++# 📣 درخواست مشارکتِ پس از امتحان (/examrequest) + مجوزهای ادمین (/adminperm)
++# پیام با دکمه‌ی «ارسال تجربه امتحان» می‌رود؛ پاسخ‌ها همان فرمِ موجود و صفِ تأییدِ ادمین
++# (pending_submissions) را طی می‌کنند -- هیچ ساختارِ مشارکتیِ جدیدی ساخته نشده.
++# ============================================================
++
++ADMIN_PERMISSIONS = {
++    "exam_request": "📣 ارسال درخواست مشارکت پس از امتحان",
++    "study_announce": "👥 ارسال اطلاعیه‌ی اتاق مطالعه برای ترم خودش",
++    "market_moderate": "🚩 بررسی گزارش‌های بازارچه (/marketreports)",
++}
++
++EXAM_REQUEST_DEFAULT_TEXT = (
++    "📝 امتحانت تموم شد؟ تجربه‌ی تو برای دانشجوهای بعدی خیلی ارزشمنده 🙏\n\n"
++    "اگه وقت داری بگو: امتحان چطور بود؟ چقدر سخت بود؟ کدوم مباحث مهم‌تر بودن؟ "
++    "چه سؤال‌هایی ممکنه دوباره بیاد؟ و چه منبعی کمکت کرد؟\n\n"
++    "با دکمه‌ی پایین در چند قدم ثبتش کن؛ بعد از تأییدِ مدیر منتشر می‌شه."
++)
++EXAM_REQUEST_MAX_LEN = 1500
++EXAM_REQUEST_SEND_DELAY = 0.05
++_exam_request_tasks: set = set()
++
++
++def can_send_exam_request(user_id: int) -> bool:
++    return dbmod.has_admin_permission(user_id, "exam_request")
++
++
++def _exam_request_markup() -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup([[InlineKeyboardButton("📝 ارسال تجربه امتحان", callback_data="submit_exam_start")]])
++
++
++async def examrequest_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    user_id = update.effective_user.id
++    if not is_admin(user_id):
++        return
++    if not can_send_exam_request(user_id):
++        await update.message.reply_text("⛔️ مجوزِ ارسالِ درخواستِ مشارکت برای شما فعال نیست. از سوپرادمین بخواه.")
++        return
++    scopes = []  # None = همه‌ی کاربران
++    if is_super_admin(user_id):
++        scopes.append(None)
++    scopes.extend(admin_allowed_programs(user_id))
++    if not scopes:
++        await update.message.reply_text("شما دسترسیِ مدیریتِ هیچ ترمی را ندارید.")
++        return
++    context.user_data["examreq_scopes"] = scopes
++    buttons = [
++        [InlineKeyboardButton("🌍 همه‌ی ترم‌ها" if sc is None else sc, callback_data=f"examreq_scope:{i}")]
++        for i, sc in enumerate(scopes)
++    ]
++    await update.message.reply_text("درخواستِ مشارکت برای کدام ترم ارسال شود؟", reply_markup=InlineKeyboardMarkup(buttons))
++
++
++def _examreq_preview(context: ContextTypes.DEFAULT_TYPE, req: dict) -> tuple:
++    count = len(dbmod.get_user_ids_for_term(req["scope"]))
++    scope_label = "همه‌ی ترم‌ها" if req["scope"] is None else req["scope"]
++    text = (
++        "📣 پیش‌نمایشِ درخواستِ مشارکت\n──────────────\n"
++        f"{req['text']}\n──────────────\n"
++        f"🎯 مخاطبان: {scope_label} — حدود {count} نفر (کاربرانی که ترمشان ثبت شده)\n"
++        "با «✅ تأیید و ارسال» برای همه‌شان فرستاده می‌شود."
++    )
++    markup = InlineKeyboardMarkup([
++        [InlineKeyboardButton("✅ تأیید و ارسال", callback_data=f"examreq_ok:{req['nonce']}")],
++        [InlineKeyboardButton("✏️ ویرایش متن", callback_data="examreq_edit"),
++         InlineKeyboardButton("✖️ انصراف", callback_data="examreq_cancel")],
++    ])
++    return text, markup
++
++
++async def examreq_scope_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    if not (is_admin(user_id) and can_send_exam_request(user_id)):
++        await query.answer("⛔️ مجاز نیستید.", show_alert=True)
++        return
++    await query.answer()
++    scopes = context.user_data.get("examreq_scopes") or []
++    try:
++        scope = scopes[int(query.data.split(":", 1)[1])]
++    except (ValueError, IndexError):
++        await query.edit_message_text("این درخواست منقضی شده؛ دوباره /examrequest را بزن.")
++        return
++    # ادمین ترم فقط ترم‌های خودش؛ ارسال برای «همه» فقط سوپرادمین (دوباره چک می‌شود)
++    if scope is None and not is_super_admin(user_id):
++        await query.edit_message_text("⛔️ ارسال برای همه‌ی ترم‌ها فقط با سوپرادمین است.")
++        return
++    if scope is not None and not can_manage_term(user_id, scope):
++        await deny_term_access(query, scope)
++        return
++    req = {"scope": scope, "text": EXAM_REQUEST_DEFAULT_TEXT, "nonce": uuid.uuid4().hex[:10]}
++    context.user_data["examreq"] = req
++    text, markup = _examreq_preview(context, req)
++    await query.edit_message_text(text, reply_markup=markup)
++
++
++async def examreq_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    if not context.user_data.get("examreq"):
++        await query.answer("منقضی شده؛ دوباره /examrequest.", show_alert=True)
++        return
++    await query.answer()
++    context.user_data["examreq_awaiting_text"] = True
++    await query.message.reply_text(f"متنِ جدید را بفرست (حداکثر {EXAM_REQUEST_MAX_LEN} نویسه). برای انصراف از دکمه‌ی ✖️ استفاده کن.")
++
++
++async def examreq_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
++    """True یعنی پیام مصرف شد."""
++    if not context.user_data.get("examreq_awaiting_text"):
++        return False
++    req = context.user_data.get("examreq")
++    context.user_data.pop("examreq_awaiting_text", None)
++    if not req or not can_send_exam_request(update.effective_user.id):
++        return True
++    new_text = (update.message.text or "").strip()
++    if not new_text or len(new_text) > EXAM_REQUEST_MAX_LEN:
++        context.user_data["examreq_awaiting_text"] = True
++        await update.message.reply_text(f"متن باید خالی نباشد و حداکثر {EXAM_REQUEST_MAX_LEN} نویسه باشد؛ دوباره بفرست.")
++        return True
++    req["text"] = new_text
++    req["nonce"] = uuid.uuid4().hex[:10]  # پیش‌نمایشِ قبلی بی‌اعتبار می‌شود
++    text, markup = _examreq_preview(context, req)
++    await update.message.reply_text(text, reply_markup=markup)
++    return True
++
++
++async def examreq_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    for k in ("examreq", "examreq_awaiting_text", "examreq_scopes"):
++        context.user_data.pop(k, None)
++    await query.answer("لغو شد.")
++    try:
++        await query.edit_message_text("✖️ ارسالِ درخواست لغو شد. چیزی برای کسی فرستاده نشد.")
++    except TelegramError:
++        pass
++
++
++async def examreq_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    if not (is_admin(user_id) and can_send_exam_request(user_id)):
++        await query.answer("⛔️ مجاز نیستید.", show_alert=True)
++        return
++    req = context.user_data.get("examreq")
++    nonce = query.data.split(":", 1)[1]
++    if not req or req.get("nonce") != nonce:
++        await query.answer("این پیش‌نمایش دیگر معتبر نیست؛ دوباره /examrequest.", show_alert=True)
++        return
++    scope = req["scope"]
++    if (scope is None and not is_super_admin(user_id)) or (scope is not None and not can_manage_term(user_id, scope)):
++        await query.answer("⛔️ مجاز نیستید.", show_alert=True)
++        return
++    bot_data = context.application.bot_data
++    if bot_data.get("exam_request_running"):
++        await query.answer("⏳ یک ارسال در حال انجام است.", show_alert=True)
++        return
++    # nonce یک‌بارمصرف؛ از اینجا تا ست‌شدنِ پرچم await نیست (بدون race)
++    context.user_data.pop("examreq", None)
++    bot_data["exam_request_running"] = True
++    recipients = [uid for uid in dbmod.get_user_ids_for_term(scope) if int(uid) != int(user_id)]
++    await query.answer("ارسال شروع شد…")
++    try:
++        await query.edit_message_text(f"📤 ارسال برای {len(recipients)} نفر شروع شد؛ نتیجه را همین‌جا می‌فرستم.")
++    except TelegramError:
++        pass
++    task = asyncio.create_task(
++        _run_exam_request(context.application, user_id, query.message.chat_id, recipients, req["text"], scope)
++    )
++    _exam_request_tasks.add(task)
++    task.add_done_callback(_exam_request_tasks.discard)
++
++
++async def _run_exam_request(app: Application, sender_id: int, report_chat_id: int, recipients: list, text: str, scope) -> None:
++    sent = blocked = failed = 0
++    try:
++        for uid in recipients:
++            for attempt in range(2):
++                try:
++                    await app.bot.send_message(chat_id=int(uid), text=text, reply_markup=_exam_request_markup())
++                    sent += 1
++                    break
++                except RetryAfter as e:
++                    if attempt == 0:
++                        await asyncio.sleep(float(getattr(e, "retry_after", 1)) + 1)
++                        continue
++                    failed += 1
++                except Forbidden:
++                    blocked += 1
++                    break
++                except Exception:
++                    failed += 1
++                    break
++            await asyncio.sleep(EXAM_REQUEST_SEND_DELAY)
++        try:
++            dbmod.log_action(sender_id, "exam_request_broadcast", term=scope,
++                             detail=f"sent={sent} blocked={blocked} failed={failed}")
++        except Exception:
++            logger.exception("ثبتِ لاگِ درخواستِ مشارکت ناموفق بود.")
++    except Exception:
++        logger.exception("ارسالِ درخواستِ مشارکت با خطا مواجه شد.")
++    finally:
++        app.bot_data["exam_request_running"] = False
++        try:
++            await app.bot.send_message(
++                chat_id=report_chat_id,
++                text=f"📣 نتیجه‌ی ارسالِ درخواستِ مشارکت\n\n✅ موفق: {sent}\n🚫 بلاک/در دسترس نیست: {blocked}\n⚠️ سایر خطاها: {failed}",
++            )
++        except Exception:
++            logger.exception("ارسالِ گزارشِ نتیجه ناموفق بود.")
++
++
++async def adminperm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """/adminperm list | /adminperm <user_id> <مجوز> on|off  -- فقط SUPER_ADMIN."""
++    if not is_super_admin(update.effective_user.id):
++        return
++    args = context.args or []
++    perms_help = "\n".join(f"• {k} — {v}" for k, v in ADMIN_PERMISSIONS.items())
++    if not args or args[0].lower() == "list":
++        rows = dbmod.list_admin_permissions()
++        lines = [f"• {uid}: {perm}" for uid, perm in rows] or ["هنوز مجوزی داده نشده."]
++        await update.message.reply_text(
++            "🔐 مجوزهای ادمین‌ها:\n" + "\n".join(lines) + f"\n\nمجوزهای موجود:\n{perms_help}\n\n"
++            "استفاده: /adminperm <user_id> <مجوز> on|off"
++        )
++        return
++    if len(args) != 3 or args[2].lower() not in ("on", "off") or args[1] not in ADMIN_PERMISSIONS:
++        await update.message.reply_text(f"فرمت: /adminperm <user_id> <مجوز> on|off\n\n{perms_help}")
++        return
++    try:
++        target = int(args[0])
++    except ValueError:
++        await update.message.reply_text("user_id باید عدد باشد.")
++        return
++    if not dbmod.get_admin_roles(target):
++        await update.message.reply_text("این کاربر ادمین نیست؛ اول با /addadmin او را ادمین کن.")
++        return
++    enabled = args[2].lower() == "on"
++    dbmod.set_admin_permission(target, args[1], enabled, granted_by=update.effective_user.id)
++    dbmod.log_action(update.effective_user.id, "ADMIN_PERMISSION", detail=f"user={target} perm={args[1]} on={enabled}")
++    await update.message.reply_text(("✅ مجوز فعال شد." if enabled else "✅ مجوز غیرفعال شد.") + f"\n{target} ← {args[1]}")
++
++
++# ============================================================
++# 🔗 اشتراک‌گذاریِ محتوا با لینک (برای همه‌ی کاربران)
++# از همان سازوکارِ `/start <payload>` استفاده می‌شود؛ payloadها: file_<fid> (قبلی)،
++# crs_<course_id>، cat_<course_id>_<cat_id>، grp_<course_id>_<cat_id>_<group_id>، sch_<token>.
++# لینک فقط یک پیام با دکمه‌ی «باز کردن» می‌فرستد که همان callbackهای موجود (course:/cat:/fgrp:) را
++# صدا می‌زند؛ پس دسترسی‌ها و منوها هیچ سیستمِ موازی‌ای ندارند.
++# ============================================================
++
++SHARE_DEEPLINK_PREFIXES = ("crs_", "cat_", "grp_", "sch_")
++
++
++def _share_link(bot_username: str, payload: str) -> str:
++    username = (bot_username or "MedVersegoums_bot").lstrip("@")
++    return f"https://t.me/{username}?start={payload}"
++
++
++async def _send_share_message(query, title: str, link: str) -> None:
++    share_url = f"https://t.me/share/url?url={_urlquote(link, safe='')}&text={_urlquote(title, safe='')}"
++    await query.message.reply_text(
++        f"🔗 لینکِ اشتراک‌گذاریِ {title}:\n\n{link}\n\n"
++        "هر کسی این لینک را باز کند مستقیم به همین بخش می‌رسد.",
++        reply_markup=InlineKeyboardMarkup([
++            [InlineKeyboardButton("📤 ارسال برای دوستان", url=share_url)],
++        ]),
++    )
++
++
++def _resolve_share_target(kind: str, ids: list):
++    """(title, payload, open_callback) یا None اگر محتوا وجود ندارد/با هم نمی‌خواند."""
++    if kind == "crs" and len(ids) == 1:
++        ref = dbmod.get_course_by_id(ids[0])
++        if ref:
++            return f"📚 «{ref['name']}» ({ref['term_name']})", f"crs_{ids[0]}", f"course:{ids[0]}"
++    elif kind == "cat" and len(ids) == 2:
++        ref = dbmod.get_course_by_id(ids[0])
++        cat = dbmod.get_category_by_id(ids[1])
++        if ref and cat and cat["course_id"] == ids[0]:
++            return f"📂 «{cat['name']}» — {ref['name']}", f"cat_{ids[0]}_{ids[1]}", f"cat:{ids[0]}:{ids[1]}"
++    elif kind == "grp" and len(ids) == 3:
++        ref = dbmod.get_course_by_id(ids[0])
++        cat = dbmod.get_category_by_id(ids[1])
++        grp = dbmod.get_file_group(ids[2])
++        if (ref and cat and grp and cat["course_id"] == ids[0]
++                and grp.get("course_id") == ids[0] and grp.get("category_id") == ids[1]):
++            return (f"📁 «{grp['name']}» — {cat['name']} — {ref['name']}",
++                    f"grp_{ids[0]}_{ids[1]}_{ids[2]}", f"fgrp:{ids[0]}:{ids[1]}:{ids[2]}")
++    return None
++
++
++async def share_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """share:crs:<course> | share:cat:<course>:<cat> | share:grp:<course>:<cat>:<group>"""
++    query = update.callback_query
++    parts = query.data.split(":")
++    try:
++        target = _resolve_share_target(parts[1], [int(x) for x in parts[2:]])
++    except (ValueError, IndexError):
++        target = None
++    if target is None:
++        await query.answer("این بخش دیگه پیدا نشد.", show_alert=True)
++        return
++    await query.answer()
++    title, payload, _cb = target
++    await _send_share_message(query, title, _share_link(getattr(context.bot, "username", None), payload))
++
++
++def _share_button(kind: str, *ids) -> list:
++    return [InlineKeyboardButton("🔗 اشتراک‌گذاری لینک", callback_data="share:" + ":".join([kind, *[str(i) for i in ids]]))]
++
++
++def _render_schedule_snapshot(snapshot_json: str) -> str:
++    try:
++        snap = json.loads(snapshot_json)
++    except (TypeError, ValueError):
++        return ""
++    lines = ["📖 برنامه‌ی مطالعه‌ی اشتراکی (فقط‌خواندنی)", "──────────────"]
++    any_block = False
++    for day in DAYS_OF_WEEK:
++        blocks = snap.get(day) or []
++        if not blocks:
++            continue
++        any_block = True
++        lines.append(f"\n📅 {day}")
++        for b in blocks:
++            lines.append(f"  • {b.get('start', '?')}–{b.get('end', '?')}  {b.get('course', '')}")
++    if not any_block:
++        return ""
++    lines.append("\n(این یک نسخه‌ی ثابت از برنامه‌ی صاحبِ لینک است؛ اطلاعاتِ شخصیِ او نمایش داده نمی‌شود.)")
++    return "\n".join(lines)
++
++
++async def open_shared_deeplink(context: ContextTypes.DEFAULT_TYPE, chat_id: int, payload: str) -> bool:
++    """True اگر لینک معتبر بود و چیزی برای کاربر فرستاده شد."""
++    kind, _, rest = payload.partition("_")
++    if kind == "sch":
++        snap = dbmod.get_active_schedule_share_snapshot(rest)
++        text = _render_schedule_snapshot(snap) if snap else ""
++        if not text:
++            return False
++        await context.bot.send_message(chat_id=chat_id, text=text[:4000])
++        return True
++    try:
++        ids = [int(x) for x in rest.split("_")]
++    except ValueError:
++        return False
++    target = _resolve_share_target(kind, ids)
++    if target is None:
++        return False
++    title, _payload, open_cb = target
++    await context.bot.send_message(
++        chat_id=chat_id,
++        text=f"{title}\n\nاین بخش با لینک برات فرستاده شد:",
++        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 باز کردن", callback_data=open_cb)]]),
++    )
++    return True
++
++
++async def pshare_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    schedule = load_personal_schedule().get(str(user_id), {})
++    if not any(schedule.get(day) for day in DAYS_OF_WEEK):
++        await query.answer("هنوز بلوکی در برنامه‌ی مطالعه‌ات نیست.", show_alert=True)
++        return
++    await query.answer()
++    active = dbmod.has_active_schedule_share(user_id)
++    buttons = [[InlineKeyboardButton("🔄 به‌روزرسانی لینک با برنامه‌ی فعلی" if active else "🔗 ساخت لینک اشتراک",
++                                     callback_data="pshare_make")]]
++    if active:
++        buttons.append([InlineKeyboardButton("🚫 غیرفعال‌کردن لینک", callback_data="pshare_revoke")])
++    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="personal_schedule_menu")])
++    await query.edit_message_text(
++        "🔗 اشتراک‌گذاریِ برنامه‌ی مطالعه\n\n"
++        "یک نسخه‌ی ثابت از «روز، ساعت و درسِ» بلوک‌هایت ساخته می‌شود. نام، آیدی و بقیه‌ی اطلاعاتت در آن نیست "
++        "و هر وقت خواستی لینک را غیرفعال می‌کنی. بعد از تغییر برنامه، لینک خودکار به‌روز نمی‌شود؛ باید دوباره بسازی."
++        + ("\n\n✅ الان یک لینکِ فعال داری." if active else ""),
++        reply_markup=InlineKeyboardMarkup(buttons),
++    )
++
++
++async def pshare_make_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    schedule = load_personal_schedule().get(str(user_id), {})
++    snapshot = {
++        day: [{"start": b.get("start"), "end": b.get("end"), "course": b.get("course")} for b in schedule.get(day, [])]
++        for day in DAYS_OF_WEEK if schedule.get(day)
++    }
++    if not snapshot:
++        await query.answer("هنوز بلوکی در برنامه‌ی مطالعه‌ات نیست.", show_alert=True)
++        return
++    try:
++        token = dbmod.create_schedule_share(user_id, json.dumps(snapshot, ensure_ascii=False))
++    except Exception:
++        logger.exception("ساختِ لینکِ برنامه‌ی مطالعه ناموفق بود (user=%s)", user_id)
++        await query.answer("مشکلی پیش اومد، دوباره امتحان کن 🙏", show_alert=True)
++        return
++    await query.answer("لینک ساخته شد ✅")
++    await _send_share_message(query, "برنامه‌ی مطالعه‌ات", _share_link(getattr(context.bot, "username", None), f"sch_{token}"))
++
++
++async def pshare_revoke_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    n = dbmod.revoke_schedule_shares(update.effective_user.id)
++    await query.answer("لینک غیرفعال شد ✅" if n else "لینکِ فعالی نداشتی.", show_alert=not n)
++    await render_personal_day_picker(query, update.effective_user.id)
++
++
++# ============================================================
++# 📦 دانلودِ همه‌ی فایل‌های یک محدوده به‌صورت ZIP (منطق در zipper.py)
++# ============================================================
++
++def _zip_button(kind: str, *ids) -> list:
++    return [InlineKeyboardButton("📦 دانلود همه فایل‌ها به‌صورت ZIP", callback_data="zip:" + ":".join([kind, *[str(i) for i in ids]]))]
++
++
++async def zip_download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """zip:crs:<course> | zip:cat:<course>:<cat> | zip:grp:<course>:<cat>:<group>"""
++    query = update.callback_query
++    user_id = update.effective_user.id
++    parts = query.data.split(":")
++    try:
++        kind, ids = parts[1], [int(x) for x in parts[2:]]
++        if (kind, len(ids)) not in (("crs", 1), ("cat", 2), ("grp", 3)):
++            raise ValueError
++    except (ValueError, IndexError):
++        await query.answer("درخواست نامعتبر.", show_alert=True)
++        return
++    if user_id in zipper.active_users:
++        await query.answer("⏳ یک ZIP از خودت در حال آماده‌سازیه؛ صبر کن تا تموم شه.", show_alert=True)
++        return
++    wait = zipper.cooldown_remaining(user_id)
++    if wait:
++        await query.answer(f"⏳ لطفاً {wait} ثانیه‌ی دیگه دوباره تلاش کن.", show_alert=True)
++        return
++    if zipper.busy():
++        await query.answer("ربات الان سرش شلوغه؛ چند دقیقه‌ی دیگه دوباره تلاش کن 🙏", show_alert=True)
++        return
++    await query.answer("درخواستت ثبت شد ✅")
++    zipper.active_users.add(user_id)
++    zipper.mark_request(user_id)
++    chat_id = query.message.chat_id
++    status = await context.bot.send_message(
++        chat_id=chat_id,
++        text="📦 دارم ZIP رو آماده می‌کنم؛ بسته به تعداد و حجم فایل‌ها ممکنه چند دقیقه طول بکشه. ربات در این مدت برای بقیه هم کار می‌کنه.",
++    )
++
++    async def _job() -> None:
++        try:
++            result = await zipper.run_zip_job(context.bot, chat_id, kind, ids)
++        except Exception:
++            logger.exception("ساخت/ارسالِ ZIP با خطا مواجه شد (user=%s)", user_id)
++            result = {"status": "error"}
++        finally:
++            zipper.active_users.discard(user_id)
++        st = result.get("status")
++        if st == "empty":
++            msg = "این بخش هنوز فایلی ندارد. 🌱"
++        elif st == "missing":
++            msg = "این بخش دیگه پیدا نشد؛ شاید حذف شده."
++        elif st == "busy":
++            msg = "ربات الان سرش شلوغه؛ چند دقیقه‌ی دیگه دوباره تلاش کن 🙏"
++        elif st == "too_many":
++            msg = (f"این محدوده {result.get('count')} فایل دارد و برای یک ZIP زیاد است. "
++                   "لطفاً از یک زیربخش کوچک‌تر (مثلاً یک استاد یا یک دسته) استفاده کن.")
++        elif st == "send_failed":
++            msg = "ارسالِ ZIP با مشکل روبه‌رو شد. چند دقیقه بعد دوباره امتحان کن؛ فایل‌های اصلی دست‌نخورده‌اند."
++        elif st == "ok":
++            if result["parts"] == 0:
++                msg = "هیچ فایلی قابل ارسال نبود."
++            else:
++                msg = f"✅ {result['included']} فایل در {result['parts']} ZIP ارسال شد."
++                if result.get("texts"):
++                    msg += f"\n📝 {result['texts']} متن/لینک داخل README.txt آمده."
++            if result["skipped"]:
++                shown = "\n".join(f"• {name} — {why}" for name, why in result["skipped"][:15])
++                more = len(result["skipped"]) - 15
++                msg += f"\n\n⚠️ ارسال نشد ({len(result['skipped'])}):\n{shown}" + (f"\n… و {more} مورد دیگر" if more > 0 else "")
++        else:
++            msg = "مشکلی پیش اومد؛ چند دقیقه بعد دوباره امتحان کن. فایل‌های اصلی دست‌نخورده‌اند."
++        try:
++            await context.bot.send_message(chat_id=chat_id, text=msg[:4000])
++        except Exception:
++            logger.exception("ارسالِ نتیجه‌ی ZIP ناموفق بود")
++        try:
++            await status.delete()
++        except Exception:
++            pass
++
++    context.application.create_task(_job())
++
++
++# ============================================================
++# ⏰ بازه‌های مطالعه (۴ بازه‌ی ۹۰ دقیقه‌ای روزانه) | 🏠 اتاق شخصی | 📢 اطلاعیه‌ی ترم
++# زمان‌ها با /studyslots (سوپرادمین) تنظیم می‌شوند. هیچ job زمان‌بندی‌شده‌ی جدیدی ساخته نشده.
++# ============================================================
++
++PERSONAL_ROOM_LINK_RE = re.compile(r"^https://app\.darsita\.ir/study-rooms/join/[A-Za-z0-9_-]{4,40}$")
++PERSONAL_ROOM_MAX_TEXT = 300
++STUDY_ANNOUNCE_MAX_TEXT = 800
++STUDY_ANNOUNCE_COOLDOWN_SECONDS = 600
++_study_ann_last: dict = {}
++_study_broadcast_tasks: set = set()
++
++
++def _slot_end_label(start: str) -> str:
++    h, m = map(int, start.split(":"))
++    end = (h * 60 + m + dbmod.STUDY_SLOT_MINUTES) % 1440
++    return f"{end // 60:02d}:{end % 60:02d}"
++
++
++def _slot_ended(start: str, now_dt) -> bool:
++    h, m = map(int, start.split(":"))
++    end_min = h * 60 + m + dbmod.STUDY_SLOT_MINUTES
++    if end_min > 1440:  # از نیمه‌شب رد می‌شود؛ در همان تاریخ تا آخر روز فعال می‌ماند
++        return False
++    return now_dt.hour * 60 + now_dt.minute >= end_min
++
++
++async def render_study_slots(query, user_id: int) -> None:
++    now_dt = now_tehran()
++    slot_date = now_dt.date().isoformat()
++    slots = dbmod.get_study_slots()
++    counts = dbmod.study_slot_counts(slot_date)
++    mine = dbmod.user_study_slots(user_id, slot_date)
++    lines = ["⏰ بازه‌های مطالعه‌ی امروز", "هر بازه ۹۰ دقیقه است؛ با «ملحق می‌شوم» ثبت‌نام کن و در همان ساعت به اتاق مطالعه بیا.", ""]
++    buttons = []
++    for i, start in enumerate(slots):
++        label = f"{start} – {_slot_end_label(start)}"
++        n = counts.get(i, 0)
++        lines.append(f"• {label} — {n} نفر ثبت‌نام")
++        if i in mine:
++            buttons.append([InlineKeyboardButton(f"✅ ثبت‌نام شدی — {label}", callback_data=f"sslot_have:{i}")])
++        elif _slot_ended(start, now_dt):
++            buttons.append([InlineKeyboardButton(f"⏹ تمام‌شده — {label}", callback_data="sslot_over")])
++        else:
++            buttons.append([InlineKeyboardButton(f"🙋 ملحق می‌شوم — {label}", callback_data=f"sslot_join:{i}")])
++    if mine:
++        buttons.append([InlineKeyboardButton("❌ لغو ثبت‌نام‌های من", callback_data="sslot_cancelmenu")])
++    buttons.append([InlineKeyboardButton("🚪 ورود به اتاق مطالعه", url=STUDY_ROOM_LINK)])
++    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="sslot_back")])
++    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
++
++
++async def study_slots_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    await update.callback_query.answer()
++    await render_study_slots(update.callback_query, update.effective_user.id)
++
++
++async def study_slot_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    try:
++        idx = int(query.data.split(":", 1)[1])
++        slots = dbmod.get_study_slots()
++        start = slots[idx]
++        if idx < 0:
++            raise IndexError
++    except (ValueError, IndexError):
++        await query.answer("این بازه پیدا نشد.", show_alert=True)
++        return
++    now_dt = now_tehran()
++    if _slot_ended(start, now_dt):
++        await query.answer("این بازه تموم شده.", show_alert=True)
++        await render_study_slots(query, user_id)
++        return
++    try:
++        result = dbmod.join_study_slot(user_id, now_dt.date().isoformat(), idx)
++    except Exception:
++        logger.exception("ثبت‌نام در بازه‌ی مطالعه ناموفق بود (user=%s)", user_id)
++        await query.answer("مشکلی پیش اومد، دوباره امتحان کن 🙏", show_alert=True)
++        return
++    await query.answer("✅ ثبت‌نامت انجام شد." if result == "joined" else "قبلاً در این بازه ثبت‌نام کرده بودی ✅")
++    await render_study_slots(query, user_id)
++
++
++async def study_slot_have_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    await update.callback_query.answer("قبلاً در این بازه ثبت‌نام کردی ✅", show_alert=False)
++
++
++async def study_slot_over_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    await update.callback_query.answer("این بازه تموم شده.", show_alert=False)
++
++
++async def study_slot_cancelmenu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    now_dt = now_tehran()
++    slots = dbmod.get_study_slots()
++    mine = sorted(dbmod.user_study_slots(user_id, now_dt.date().isoformat()))
++    await query.answer()
++    buttons = [
++        [InlineKeyboardButton(f"❌ لغو {slots[i]} – {_slot_end_label(slots[i])}", callback_data=f"sslot_cancel:{i}")]
++        for i in mine if 0 <= i < len(slots)
++    ]
++    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="sslot_list")])
++    await query.edit_message_text("کدام ثبت‌نام را لغو کنم؟" if len(buttons) > 1 else "ثبت‌نامِ فعالی نداری.",
++                                  reply_markup=InlineKeyboardMarkup(buttons))
++
++
++async def study_slot_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    try:
++        idx = int(query.data.split(":", 1)[1])
++    except ValueError:
++        await query.answer()
++        return
++    ok = dbmod.cancel_study_slot(update.effective_user.id, now_tehran().date().isoformat(), idx)
++    await query.answer("ثبت‌نامت لغو شد." if ok else "ثبت‌نامِ فعالی برای این بازه نداشتی.")
++    await render_study_slots(query, update.effective_user.id)
++
++
++async def study_slot_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    await query.answer()
++    await query.edit_message_text(
++        STUDY_ROOM_TEXT, parse_mode="HTML", reply_markup=study_room_markup(update.effective_user.id),
++        disable_web_page_preview=True,
++    )
++
++
++async def studyslots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """/studyslots [HH:MM HH:MM HH:MM HH:MM] -- فقط سوپرادمین؛ بدونِ آرگومان زمان‌های فعلی را نشان می‌دهد."""
++    if not is_super_admin(update.effective_user.id):
++        return
++    args = context.args or []
++    if not args:
++        cur = dbmod.get_study_slots()
++        await update.message.reply_text(
++            "⏰ زمان‌های فعلیِ بازه‌ها (هرکدام ۹۰ دقیقه):\n"
++            + "\n".join(f"{i + 1}. {t} – {_slot_end_label(t)}" for i, t in enumerate(cur))
++            + "\n\nتغییر: /studyslots 08:00 10:00 16:00 18:00\n(چهار زمانِ شروع، صعودی، قالب HH:MM؛ ثبت‌نام‌های امروز با شماره‌ی بازه نگه‌داری می‌شوند.)"
++        )
++        return
++    if not dbmod.set_study_slots(args):
++        await update.message.reply_text("❌ نامعتبر. دقیقاً چهار زمانِ متفاوت و صعودی با قالب HH:MM بده؛ مثلاً:\n/studyslots 08:00 10:00 16:00 18:00")
++        return
++    dbmod.log_action(update.effective_user.id, "STUDY_SLOTS", detail=" ".join(args))
++    await update.message.reply_text("✅ زمان‌های بازه‌ها ذخیره شد:\n" + "\n".join(f"{i + 1}. {t} – {_slot_end_label(t)}" for i, t in enumerate(dbmod.get_study_slots())))
++
++
++# ---------------- ارسالِ مشترک (اطلاعیه‌ی ترم / اتاق شخصی) ----------------
++
++def _study_room_buttons(link: str) -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup([
++        [InlineKeyboardButton("🚪 ورود به اتاق مطالعه", url=link)],
++        [_study_notify_button(True)],
++    ])
++
++
++async def _study_send_one(bot, chat_id: int, text: str, markup) -> str:
++    for attempt in range(2):
++        try:
++            await bot.send_message(chat_id=int(chat_id), text=text, reply_markup=markup, disable_web_page_preview=True)
++            return "sent"
++        except RetryAfter as e:
++            if attempt == 0:
++                await asyncio.sleep(float(getattr(e, "retry_after", 1)) + 1)
++                continue
++            return "failed"
++        except Forbidden:
++            return "blocked"
++        except Exception:
++            return "failed"
++    return "failed"
++
++
++async def _run_study_broadcast(app: Application, flag: str, sender_id: int, report_chat_id: int,
++                               recipients: list, text: str, markup, action: str, detail_prefix: str) -> None:
++    sent = blocked = failed = 0
++    try:
++        for uid in recipients:
++            r = await _study_send_one(app.bot, uid, text, markup)
++            sent += r == "sent"
++            blocked += r == "blocked"
++            failed += r == "failed"
++            await asyncio.sleep(STUDY_INVITE_SEND_DELAY)
++        try:
++            dbmod.log_action(sender_id, action, detail=f"{detail_prefix} sent={sent} blocked={blocked} failed={failed}")
++        except Exception:
++            logger.exception("ثبتِ لاگِ ارسال ناموفق بود.")
++    except Exception:
++        logger.exception("ارسالِ گروهیِ اتاق مطالعه با خطا مواجه شد (%s).", action)
++    finally:
++        app.bot_data[flag] = False
++        try:
++            await app.bot.send_message(
++                chat_id=report_chat_id,
++                text=f"📣 نتیجه‌ی ارسال\n\n✅ موفق: {sent}\n🚫 بلاک/در دسترس نیست: {blocked}\n⚠️ سایر خطاها: {failed}",
++            )
++        except Exception:
++            logger.exception("ارسالِ گزارشِ نتیجه ناموفق بود.")
++
++
++def _study_term_recipients(sender_id: int, term_name) -> list:
++    users = [uid for uid in dbmod.get_users_for_notify("study_room") if int(uid) != int(sender_id)]
++    in_term = {int(u) for u in dbmod.get_user_ids_for_term(term_name)}
++    return [uid for uid in users if int(uid) in in_term]
++
++
++# ---------------- 📢 اطلاعیه‌ی اتاق مطالعه (سوپرادمین: همه/یک ترم؛ ادمین ترمِ مجاز: فقط ترمِ خودش) ----------------
++
++async def study_announce_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    if not can_send_study_announce(user_id):
++        await query.answer("⛔️ مجوزِ ارسالِ اطلاعیه برای شما فعال نیست. از سوپرادمین بخواه.", show_alert=True)
++        return
++    await query.answer()
++    scopes = [None] if is_super_admin(user_id) else []
++    scopes.extend(admin_allowed_programs(user_id))
++    if not scopes:
++        await query.message.reply_text("شما دسترسیِ مدیریتِ هیچ ترمی را ندارید.")
++        return
++    context.user_data["studyann_scopes"] = scopes
++    buttons = [[InlineKeyboardButton("🌍 همه‌ی ترم‌ها" if sc is None else sc, callback_data=f"studyann_scope:{i}")]
++               for i, sc in enumerate(scopes)]
++    await query.message.reply_text("اطلاعیه برای کدام ترم ارسال شود؟", reply_markup=InlineKeyboardMarkup(buttons))
++
++
++async def study_announce_scope_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    if not can_send_study_announce(user_id):
++        await query.answer("⛔️ مجاز نیستید.", show_alert=True)
++        return
++    scopes = context.user_data.get("studyann_scopes") or []
++    try:
++        scope = scopes[int(query.data.split(":", 1)[1])]
++    except (ValueError, IndexError):
++        await query.answer()
++        await query.edit_message_text("منقضی شد؛ دوباره از «📢 اطلاعیه‌ی اتاق مطالعه» شروع کن.")
++        return
++    if (scope is None and not is_super_admin(user_id)) or (scope is not None and not can_manage_term(user_id, scope)):
++        await query.answer("⛔️ مجاز نیستید.", show_alert=True)
++        return
++    await query.answer()
++    context.user_data["studyann"] = {"scope": scope}
++    context.user_data["studyann_awaiting"] = True
++    await query.edit_message_text(f"متنِ اطلاعیه را بفرست (حداکثر {STUDY_ANNOUNCE_MAX_TEXT} نویسه). لینکِ اتاقِ رسمی خودکار کنارش می‌آید.")
++
++
++async def study_announce_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    import time as _time
++    if not can_send_study_announce(user_id):
++        await query.answer("⛔️ مجاز نیستید.", show_alert=True)
++        return
++    req = context.user_data.get("studyann")
++    nonce = query.data.split(":", 1)[1]
++    if not req or req.get("nonce") != nonce or not req.get("text"):
++        await query.answer("این پیش‌نمایش دیگر معتبر نیست؛ دوباره شروع کن.", show_alert=True)
++        return
++    scope = req["scope"]
++    if (scope is None and not is_super_admin(user_id)) or (scope is not None and not can_manage_term(user_id, scope)):
++        await query.answer("⛔️ مجاز نیستید.", show_alert=True)
++        return
++    left = STUDY_ANNOUNCE_COOLDOWN_SECONDS - (_time.time() - _study_ann_last.get(user_id, 0))
++    bot_data = context.application.bot_data
++    if bot_data.get("study_ann_running") or left > 0:
++        await query.answer("⏳ یک ارسال در جریانه یا به‌تازگی انجام شده؛ کمی بعد دوباره تلاش کن.", show_alert=True)
++        return
++    context.user_data.pop("studyann", None)
++    bot_data["study_ann_running"] = True
++    _study_ann_last[user_id] = _time.time()
++    recipients = _study_term_recipients(user_id, scope)
++    await query.answer("ارسال شروع شد…")
++    try:
++        await query.edit_message_text(f"📤 ارسالِ اطلاعیه برای {len(recipients)} نفر شروع شد؛ نتیجه را همین‌جا می‌فرستم.")
++    except TelegramError:
++        pass
++    task = asyncio.create_task(_run_study_broadcast(
++        context.application, "study_ann_running", user_id, query.message.chat_id, recipients,
++        f"📢 اطلاعیه‌ی اتاق مطالعه\n\n{req['text']}", _study_room_buttons(STUDY_ROOM_LINK),
++        "study_announce_broadcast", f"scope={'all' if scope is None else scope}",
++    ))
++    _study_broadcast_tasks.add(task)
++    task.add_done_callback(_study_broadcast_tasks.discard)
++
++
++async def study_announce_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    for k in ("studyann", "studyann_awaiting", "studyann_scopes"):
++        context.user_data.pop(k, None)
++    await update.callback_query.answer("لغو شد.")
++    try:
++        await update.callback_query.edit_message_text("✖️ لغو شد. چیزی برای کسی فرستاده نشد.")
++    except TelegramError:
++        pass
++
++
++# ---------------- 🏠 اتاقِ مطالعه‌ی شخصی ----------------
++
++def _personal_room_nickname(user_id: int) -> str:
++    nick = (load_users().get(str(user_id), {}) or {}).get("nickname")
++    return nick or "یکی از هم‌کلاسی‌هات"
++
++
++async def personal_room_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    term = get_user_class_program(user_id)
++    if not term:
++        await query.answer("اول ترمت را انتخاب کن (📅 برنامه شخصی ← 🔁 تغییر ترم).", show_alert=True)
++        return
++    allowed, wait = dbmod.personal_room_limits(user_id)
++    if not allowed:
++        msg = (f"⏳ حدود {wait} دقیقه‌ی دیگر می‌توانی دوباره دعوت بفرستی." if wait > 0
++               else "امروز به سقفِ ۳ دعوتِ شخصی رسیدی؛ فردا دوباره امتحان کن.")
++        await query.answer(msg, show_alert=True)
++        return
++    await query.answer()
++    context.user_data["proom"] = {"step": "link", "term": term}
++    await query.message.reply_text(
++        "🏠 اتاق مطالعه‌ی شخصی\n\nاول در درسیتا یک اتاق بساز، بعد لینک دعوتش را همین‌جا بفرست "
++        "(به شکل https://app.darsita.ir/study-rooms/join/...).\nدعوت فقط برای هم‌ترمی‌هایت فرستاده می‌شود.",
++        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖️ انصراف", callback_data="proom_cancel")]]),
++    )
++
++
++async def personal_room_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    context.user_data.pop("proom", None)
++    await update.callback_query.answer("لغو شد.")
++    try:
++        await update.callback_query.edit_message_text("✖️ لغو شد. چیزی فرستاده نشد.")
++    except TelegramError:
++        pass
++
++
++async def personal_room_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    import time as _time
++    req = context.user_data.get("proom")
++    nonce = query.data.split(":", 1)[1]
++    if not req or req.get("step") != "ready" or req.get("nonce") != nonce:
++        await query.answer("این پیش‌نمایش دیگر معتبر نیست؛ دوباره شروع کن.", show_alert=True)
++        return
++    term = get_user_class_program(user_id)
++    if not term or term != req["term"]:
++        await query.answer("ترمت تغییر کرده؛ دوباره شروع کن.", show_alert=True)
++        return
++    allowed, _wait = dbmod.personal_room_limits(user_id)
++    bot_data = context.application.bot_data
++    if not allowed or bot_data.get("study_personal_running"):
++        await query.answer("⏳ الان امکانِ ارسال نیست؛ کمی بعد دوباره امتحان کن.", show_alert=True)
++        return
++    context.user_data.pop("proom", None)
++    bot_data["study_personal_running"] = True
++    recipients = _study_term_recipients(user_id, term)
++    try:
++        dbmod.add_personal_study_room(user_id, term, req["link"], req["text"], len(recipients))
++    except Exception:
++        bot_data["study_personal_running"] = False
++        logger.exception("ثبتِ اتاقِ شخصی ناموفق بود (user=%s)", user_id)
++        await query.answer("مشکلی پیش اومد، دوباره امتحان کن 🙏", show_alert=True)
++        return
++    await query.answer("ارسال شروع شد…")
++    try:
++        await query.edit_message_text(f"📤 دعوت برای {len(recipients)} هم‌ترمی شروع شد؛ نتیجه را همین‌جا می‌فرستم.")
++    except TelegramError:
++        pass
++    body = f"🏠 دعوت به اتاق مطالعه از طرف {_personal_room_nickname(user_id)}"
++    if req["text"]:
++        body += f"\n\n{req['text']}"
++    task = asyncio.create_task(_run_study_broadcast(
++        context.application, "study_personal_running", user_id, query.message.chat_id, recipients,
++        body, _study_room_buttons(req["link"]), "personal_study_room_broadcast", f"term={term}",
++    ))
++    _study_broadcast_tasks.add(task)
++    task.add_done_callback(_study_broadcast_tasks.discard)
++
++
++async def study_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
++    """متن‌های ورودیِ اتاق شخصی (لینک/متن) و اطلاعیه. True یعنی پیام مصرف شد."""
++    text = (update.message.text or "").strip()
++    user_id = update.effective_user.id
++    # --- اطلاعیه ---
++    if context.user_data.get("studyann_awaiting"):
++        req = context.user_data.get("studyann")
++        context.user_data.pop("studyann_awaiting", None)
++        if not req or not can_send_study_announce(user_id):
++            return True
++        if not text or len(text) > STUDY_ANNOUNCE_MAX_TEXT:
++            context.user_data["studyann_awaiting"] = True
++            await update.message.reply_text(f"متن باید خالی نباشد و حداکثر {STUDY_ANNOUNCE_MAX_TEXT} نویسه باشد؛ دوباره بفرست.")
++            return True
++        req["text"] = text
++        req["nonce"] = uuid.uuid4().hex[:10]
++        scope = req["scope"]
++        count = len(_study_term_recipients(user_id, scope))
++        await update.message.reply_text(
++            f"📢 پیش‌نمایشِ اطلاعیه\n──────────────\n{text}\n──────────────\n"
++            f"🎯 مخاطبان: {'همه‌ی ترم‌ها' if scope is None else scope} — حدود {count} نفر (اعلان اتاق مطالعه روشن)",
++            reply_markup=InlineKeyboardMarkup([
++                [InlineKeyboardButton("✅ تأیید و ارسال", callback_data=f"studyann_ok:{req['nonce']}")],
++                [InlineKeyboardButton("✖️ انصراف", callback_data="studyann_cancel")],
++            ]),
++        )
++        return True
++    # --- اتاق شخصی ---
++    req = context.user_data.get("proom")
++    if not req:
++        return False
++    if req["step"] == "link":
++        if not PERSONAL_ROOM_LINK_RE.match(text):
++            await update.message.reply_text("لینک معتبر نیست. باید دقیقاً شبیه این باشد:\nhttps://app.darsita.ir/study-rooms/join/xxxx")
++            return True
++        if text == STUDY_ROOM_LINK:
++            await update.message.reply_text("این لینکِ اتاقِ رسمیِ MedVerse است؛ لینکِ اتاقِ شخصیِ خودت را بفرست.")
++            return True
++        req["link"] = text
++        req["step"] = "text"
++        await update.message.reply_text(f"یک متن کوتاه برای هم‌کلاسی‌ها بنویس (حداکثر {PERSONAL_ROOM_MAX_TEXT} نویسه)، یا «-» بفرست تا بدون متن ارسال شود.")
++        return True
++    if req["step"] == "text":
++        if len(text) > PERSONAL_ROOM_MAX_TEXT or not text:
++            await update.message.reply_text(f"حداکثر {PERSONAL_ROOM_MAX_TEXT} نویسه؛ دوباره بفرست (یا «-»).")
++            return True
++        req["text"] = "" if text == "-" else text
++        req["step"] = "ready"
++        req["nonce"] = uuid.uuid4().hex[:10]
++        count = len(_study_term_recipients(user_id, req["term"]))
++        await update.message.reply_text(
++            "🏠 پیش‌نمایشِ دعوت\n──────────────\n"
++            f"از طرف {_personal_room_nickname(user_id)}\n{req['text'] or '(بدون متن)'}\n🔗 {req['link']}\n──────────────\n"
++            f"🎯 هم‌ترمی‌ها ({req['term']}) — حدود {count} نفر (اعلان اتاق مطالعه روشن)\n"
++            "نامِ لقب‌ات (نه آیدی/شماره) نمایش داده می‌شود.",
++            reply_markup=InlineKeyboardMarkup([
++                [InlineKeyboardButton("✅ تأیید و ارسال", callback_data=f"proom_ok:{req['nonce']}")],
++                [InlineKeyboardButton("✖️ انصراف", callback_data="proom_cancel")],
++            ]),
++            disable_web_page_preview=True,
++        )
++        return True
++    return False
++
++
+ async def on_channel_membership_change(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+     """آپدیتِ chat_member رو از کانال می‌گیره تا بفهمیم کاربری لفت داده/بن شده.
+     قبلاً has_joined_channel فقط یه فلگِ یک‌بارمصرف بود که هیچ‌وقت دوباره چک
+@@ -2780,6 +3937,11 @@
+             "/removeadmin USER_ID - حذف دسترسی ادمین یه کاربر\n"
+             "/listadmins - لیست همه‌ی ادمین‌ها\n"
+             "/syncmembers - بررسی و همگام‌سازیِ عضویتِ کاربران در کانال\n"
++            "/marketreports - گزارش‌های باز بازارچه (سوپرادمین یا ناظرِ دارای مجوز market_moderate)\n"
++            "/studyslots - تنظیم/نمایشِ زمانِ چهار بازه‌ی مطالعه‌ی روزانه\n"
++            "/adminperm - دادن/گرفتنِ مجوزِ قابلیت‌های خاص به ادمین ترم (/adminperm list)\n"
++            "/retrychannel - تلاش مجدد برای فایل‌هایی که انتشارشان در کانال آرشیو ناموفق بود\n"
++            "/examrequest - ارسال درخواستِ مشارکت پس از امتحان (سوپرادمین یا ادمین ترمِ دارای مجوز)\n"
+         )
+     await update.message.reply_text(text)
+ 
+@@ -4821,6 +5983,7 @@
+     course = data.setdefault(entry["term"], {}).setdefault(entry["course"], new_course())
+     ensure_course_shape(course)
+ 
++    new_fid = uuid.uuid4().hex[:8]
+     if entry["type"] == "file":
+         caption = entry["caption"]
+         if not entry["anonymous"]:
+@@ -4828,6 +5991,7 @@
+         course["categories"].setdefault(entry["category"], {"files": []})["files"].append(
+             {
+                 "type": "file",
++                "fid": new_fid,
+                 "file_id": entry["file_id"],
+                 "caption": caption,
+                 "description": entry.get("description", ""),
+@@ -4841,7 +6005,7 @@
+         category_label = "🩺 تجربه ارسالی دانشجویان"
+         broadcast_caption = f"تجربه امتحان - {entry['answers'].get('exam_date', '')}"
+         course["categories"].setdefault(category_label, {"files": []})["files"].append(
+-            {"type": "text", "content": text_content, "caption": broadcast_caption, "downloads": 0}
++            {"type": "text", "fid": new_fid, "content": text_content, "caption": broadcast_caption, "downloads": 0}
+         )
+ 
+     save_data(data)
+@@ -4863,6 +6027,7 @@
+         pass
+ 
+     await broadcast_new_file(context, entry["term"], entry["course"], category_label, broadcast_caption)
++    schedule_channel_publish(context, new_fid)
+ 
+ 
+ async def reject_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@@ -5806,32 +6971,19 @@
+     """برای ادمین لینک مستقیم یک فایل را نشان می‌دهد."""
+     query = update.callback_query
+     await query.answer()
+-    if not is_admin(update.effective_user.id):
+-        await query.answer("این بخش فقط برای ادمینه.", show_alert=True)
+-        return
+-
++    # اشتراک‌گذاریِ لینکِ فایل برای همه‌ی کاربران فعال است (محتوا برای همه قابل مشاهده است)؛
++    # ادمین‌بودن یا دسترسیِ ترم لازم نیست.
+     _, fid = query.data.split(":", 1)
+     data = load_data()
+     found = find_file_by_fid(data, fid)
+     if not found:
+-        await query.edit_message_text("این فایل دیگه پیدا نشد.")
+-        return
+-
+-    program, course_name, _category, _index, file_info = found
+-    if not can_manage_term(update.effective_user.id, program):
+-        await deny_term_access(query, program)
++        await query.message.reply_text("این فایل دیگه پیدا نشد.")
+         return
+ 
++    _program, _course_name, _category, _index, file_info = found
+     link = _direct_file_link(getattr(context.bot, "username", None), fid)
+     caption = display_caption(file_info) or file_info.get("caption", "") or "فایل"
+-    buttons = [
+-        [InlineKeyboardButton("🔗 باز کردن لینک", url=link)],
+-    ]
+-    await query.message.reply_text(
+-        f"🔗 لینک مستقیم «{caption}»:\n\n{link}\n\n"
+-        "برای کپی، روی خود لینک لمس/کلیک طولانی کن.",
+-        reply_markup=InlineKeyboardMarkup(buttons),
+-    )
++    await _send_share_message(query, f"«{caption}»", link)
+ 
+ 
+ async def filelink_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@@ -7028,6 +8180,18 @@
+ # ============================================================
+ 
+ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    # --- حالت ۰-صفر: منتظر متنِ دلخواهِ «درخواست مشارکت پس از امتحان» (ادمین مجاز) ---
++    if context.user_data.get("examreq_awaiting_text") and await examreq_handle_text(update, context):
++        return
++
++    # --- بازارچه: ویزاردِ آگهی/درخواست، جمله‌ی قصد، و گفت‌وگوی رله‌ای ---
++    if market.has_state(context) and await market.handle_text(update, context):
++        return
++
++    # --- ورودیِ متنیِ اتاق مطالعه (لینکِ اتاق شخصی/متنِ اطلاعیه) ---
++    if (context.user_data.get("proom") or context.user_data.get("studyann_awaiting")) and await study_text_input(update, context):
++        return
++
+     # --- حالت ۰-الف: منتظر لقب دلخواه کاربر (هر کسی) ---
+     if context.user_data.get("awaiting_nickname"):
+         nickname = update.message.text.strip()[:40]
+@@ -7981,8 +9145,10 @@
+         data = load_data()
+         course = data.setdefault(term_name, {}).setdefault(course_name, new_course())
+         ensure_course_shape(course)
++        new_fid = uuid.uuid4().hex[:8]  # پیش از ذخیره تعیین می‌شود تا انتشار در کانال بدانیم کدام فایل است
+         file_entry = {
+             "type": "file",
++            "fid": new_fid,
+             "file_id": pending["file_id"],
+             "caption": final_name,
+             "description": pending.get("description", ""),
+@@ -8030,6 +9196,7 @@
+         reply_markup=keyboard,
+     )
+     await broadcast_new_file(context, term_name, course_name, category, final_name)
++    schedule_channel_publish(context, new_fid)
+ 
+ 
+ async def upload_name_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@@ -8249,6 +9416,8 @@
+         buttons.append([InlineKeyboardButton("📖 راهنمای مطالعه", callback_data=f"guide:{course_id}")])
+     buttons.extend(build_course_category_buttons(program, course_name, course_data))
+ 
++    buttons.append(_share_button("crs", course_id))
++    buttons.append(_zip_button("crs", course_id))
+     buttons.append([back_button])
+     await query.edit_message_text(
+         f"«{course_name}» — یه بخش رو انتخاب کن:", reply_markup=InlineKeyboardMarkup(buttons)
+@@ -8350,9 +9519,11 @@
+             InlineKeyboardButton(display_caption(f), callback_data=f"filex:{course_id}:{cat_idx}:{i}"),
+             InlineKeyboardButton(star, callback_data=f"favtoggle:{fid}"),
+         ]
+-        if is_admin(user_id) and fid:
++        if fid:
+             row.append(InlineKeyboardButton("🔗", callback_data=f"filelink_show:{fid}"))
+         buttons.append(row)
++    buttons.append(_share_button("cat", course_id, cat_idx))
++    buttons.append(_zip_button("cat", course_id, cat_idx))
+     buttons.append([back_button])
+     await query.edit_message_text(
+         f"«{category}» (⭐️ برای ذخیره در علاقه‌مندی‌ها):", reply_markup=InlineKeyboardMarkup(buttons)
+@@ -8396,7 +9567,7 @@
+             InlineKeyboardButton(display_caption(f), callback_data=f"filex:{course_id}:{cat_idx}:{i}"),
+             InlineKeyboardButton(star, callback_data=f"favtoggle:{fid}"),
+         ]
+-        if is_admin(user_id) and fid:
++        if fid:
+             row.append(InlineKeyboardButton("🔗", callback_data=f"filelink_show:{fid}"))
+         buttons.append(row)
+ 
+@@ -8407,6 +9578,8 @@
+         )
+         return
+ 
++    buttons.append(_share_button("grp", course_id, cat_idx, group_id))
++    buttons.append(_zip_button("grp", course_id, cat_idx, group_id))
+     buttons.append([back_button])
+     await query.edit_message_text(
+         f"«{category} → {group_name}» (⭐️ برای ذخیره در علاقه‌مندی‌ها):",
+@@ -9941,6 +11114,7 @@
+         label = f"{day} ({n})" if n else day
+         buttons.append([InlineKeyboardButton(label, callback_data=f"pstudy_day:{day}")])
+     buttons.append([InlineKeyboardButton("➕ افزودن بلوک مطالعه", callback_data="pstudy_add_start")])
++    buttons.append([InlineKeyboardButton("🔗 اشتراک‌گذاری برنامه‌ام", callback_data="pshare_menu")])
+     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="schedule_root")])
+     await query.edit_message_text(
+         "📖 برنامه مطالعه‌ی شخصی‌ات — کدوم روز؟", reply_markup=InlineKeyboardMarkup(buttons)
+@@ -11502,6 +12676,9 @@
+     app = builder.build()
+ 
+     # گیت عضویت کانال + ساعت فعالیت -- باید قبل از همه اجرا بشه (گروه -1)
++    # گیتِ بخشِ غیرفعالِ «گفت‌وگو و بازی» -- قبل از همه (نگاه کن به CHAT_SECTION_ENABLED)
++    app.add_handler(MessageHandler(filters.ALL, chat_disabled_message_gate), group=-2)
++    app.add_handler(CallbackQueryHandler(chat_disabled_callback_gate), group=-2)
+     app.add_handler(MessageHandler(filters.ALL, offline_gate_message), group=-1)
+     app.add_handler(CallbackQueryHandler(offline_gate_callback), group=-1)
+ 
+@@ -11510,6 +12687,13 @@
+     app.add_handler(CommandHandler("help", help_command))
+     app.add_handler(CommandHandler("backupserver", backup_server_command))
+     app.add_handler(CommandHandler("exportchannel", export_channel_command))
++    app.add_handler(CommandHandler("retrychannel", retry_channel_command))
++    app.add_handler(CommandHandler("examrequest", examrequest_start))
++    app.add_handler(CommandHandler("adminperm", adminperm_command))
++    app.add_handler(CallbackQueryHandler(examreq_scope_pick, pattern=r"^examreq_scope:\d+$"))
++    app.add_handler(CallbackQueryHandler(examreq_edit_callback, pattern=r"^examreq_edit$"))
++    app.add_handler(CallbackQueryHandler(examreq_cancel_callback, pattern=r"^examreq_cancel$"))
++    app.add_handler(CallbackQueryHandler(examreq_confirm_callback, pattern=r"^examreq_ok:"))
+     app.add_handler(CommandHandler("darsha", list_programs))
+     app.add_handler(CommandHandler("setnickname", set_nickname_command))
+ 
+@@ -11699,6 +12883,11 @@
+     app.add_handler(CallbackQueryHandler(badge_pick_value, pattern=r"^bdg_file:"))
+     app.add_handler(CallbackQueryHandler(badge_apply, pattern=r"^bdg_set:"))
+     app.add_handler(CallbackQueryHandler(filelink_show_callback, pattern=r"^filelink_show:"))
++    app.add_handler(CallbackQueryHandler(share_link_callback, pattern=r"^share:(crs|cat|grp):\d+(:\d+){0,2}$"))
++    app.add_handler(CallbackQueryHandler(zip_download_callback, pattern=r"^zip:(crs|cat|grp):\d+(:\d+){0,2}$"))
++    app.add_handler(CallbackQueryHandler(pshare_menu_callback, pattern=r"^pshare_menu$"))
++    app.add_handler(CallbackQueryHandler(pshare_make_callback, pattern=r"^pshare_make$"))
++    app.add_handler(CallbackQueryHandler(pshare_revoke_callback, pattern=r"^pshare_revoke$"))
+     app.add_handler(CallbackQueryHandler(filelink_back_terms, pattern=r"^fl_back_terms$"))
+     app.add_handler(CallbackQueryHandler(filelink_pick_course, pattern=r"^fl_term:"))
+     app.add_handler(CallbackQueryHandler(filelink_pick_category, pattern=r"^fl_course:"))
+@@ -11756,6 +12945,24 @@
+     # دکمه‌های شیشه‌ای -- 🔔 اطلاع‌رسانیِ چند-دسته‌ای
+     app.add_handler(CallbackQueryHandler(toggle_notify_callback, pattern=r"^toggle_notify:"))
+     app.add_handler(CallbackQueryHandler(study_invite_start, pattern=r"^studyinv_start$"))
++    app.add_handler(CallbackQueryHandler(study_invite_scope_pick, pattern=r"^studyinv_scope:\d+$"))
++    app.add_handler(CommandHandler("studyslots", studyslots_command))
++    market.register(app)
++    app.add_handler(CallbackQueryHandler(study_slots_list_callback, pattern=r"^sslot_list$"))
++    app.add_handler(CallbackQueryHandler(study_slot_join_callback, pattern=r"^sslot_join:\d+$"))
++    app.add_handler(CallbackQueryHandler(study_slot_have_callback, pattern=r"^sslot_have:\d+$"))
++    app.add_handler(CallbackQueryHandler(study_slot_over_callback, pattern=r"^sslot_over$"))
++    app.add_handler(CallbackQueryHandler(study_slot_cancelmenu_callback, pattern=r"^sslot_cancelmenu$"))
++    app.add_handler(CallbackQueryHandler(study_slot_cancel_callback, pattern=r"^sslot_cancel:\d+$"))
++    app.add_handler(CallbackQueryHandler(study_slot_back_callback, pattern=r"^sslot_back$"))
++    app.add_handler(CallbackQueryHandler(study_announce_start, pattern=r"^studyann_start$"))
++    app.add_handler(CallbackQueryHandler(study_announce_scope_pick, pattern=r"^studyann_scope:\d+$"))
++    app.add_handler(CallbackQueryHandler(study_announce_confirm, pattern=r"^studyann_ok:"))
++    app.add_handler(CallbackQueryHandler(study_announce_cancel, pattern=r"^studyann_cancel$"))
++    app.add_handler(CallbackQueryHandler(personal_room_start, pattern=r"^proom_start$"))
++    app.add_handler(CallbackQueryHandler(personal_room_confirm, pattern=r"^proom_ok:"))
++    app.add_handler(CallbackQueryHandler(personal_room_cancel, pattern=r"^proom_cancel$"))
++    app.add_handler(CallbackQueryHandler(study_room_notify_callback, pattern=r"^studyroom_notify:(on|off)$"))
+     app.add_handler(CallbackQueryHandler(study_invite_confirm, pattern=r"^studyinv_ok:"))
+     app.add_handler(CallbackQueryHandler(study_invite_cancel, pattern=r"^studyinv_cancel$"))
+     app.add_handler(CallbackQueryHandler(notify_menu_close, pattern=r"^notify_menu_close$"))
+@@ -11863,7 +13070,7 @@
+     # دکمه‌های منوی دائمی (باید قبل از هندلر عمومی متن ثبت بشه)
+     menu_pattern = (
+         f"^({MENU_COURSES}|{MENU_NOTIFY}|{MENU_PARTICIPATE}|{MENU_SCHEDULE}|"
+-        f"{MENU_STUDY_GROUP}|{LEGACY_MENU_STUDY_GROUP}|{MENU_ABOUT}|{MENU_CHAT}|{MENU_SUPPORT})$"
++        f"{MENU_STUDY_GROUP}|{LEGACY_MENU_STUDY_GROUP}|{MENU_ABOUT}|{MENU_CHAT}|{MENU_SUPPORT}|{MENU_MARKET})$"
+     )
+     app.add_handler(MessageHandler(filters.Regex(menu_pattern), handle_menu_button))
+     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(CHAT_EXIT_BUTTON)}$"), chat_exit))
+--- proj/mybot-main/db.py	2026-10-25 05:09:17.000000000 +0000
++++ work/mybot-main/db.py	2026-10-27 04:53:16.398411294 +0000
+@@ -713,6 +713,10 @@
+     # فاز ۱۰: یکتاییِ نامِ ترم رو از سطحِ سراسری به سطحِ گروه می‌بره (بدونِ از دست
+     # رفتنِ هیچ داده‌ای). جدا از تراکنشِ create-table های بالا نگه داشته شده چون
+     # ممکنه لازم باشه یه بار PRAGMA foreign_keys رو موقتاً خاموش کنه.
++    ensure_admin_permissions_table()
++    ensure_schedule_shares_table()
++    ensure_study_tables()
++
+     migrate_terms_unique_per_group_v4()
+ 
+     # فاز ۱۱: امکانِ ادمینیِ هم‌زمانِ یک کاربر روی چند ترمِ مختلف (بدونِ اینکه
+@@ -2490,7 +2494,7 @@
+         "startup": is_legacy_subscriber,
+         "new_files": is_legacy_subscriber,
+         "schedule_change": False,
+-        # یادآوریِ ۱۰ دقیقه قبل از کلاس: پیش‌فرض روشنه تا رفتارِ قبلیِ ربات عوض نشه؛
++        # یادآوریِ ۱۵ دقیقه قبل از کلاس (قبلاً ۱۰): پیش‌فرض روشنه تا رفتارِ قبلیِ ربات عوض نشه؛
+         # هر دانشجو می‌تونه از «🔔 اطلاع‌رسانی» خاموشش کنه.
+         "class_reminder": True,
+         # اعلان‌های «اتاق مطالعه درسیتا»: برای همه (قدیمی و جدید) پیش‌فرض روشنه؛
+@@ -4214,3 +4218,294 @@
+             "VALUES (?, ?, ?, ?, ?)",
+             (game_id, chat_type, _room_key(course_id), json.dumps(summary, ensure_ascii=False), _now()),
+         )
++
++
++# ============================================================
++# مجوزهای قابلیت‌محور برای ادمین‌ها (مثلاً ارسال درخواست مشارکت پس از امتحان)
++# جدول جدید و مستقل است؛ هیچ جدول قبلی تغییر نمی‌کند. سوپرادمین همیشه مجاز است.
++# ============================================================
++
++def ensure_admin_permissions_table() -> None:
++    with get_conn() as conn:
++        conn.execute(
++            """
++            CREATE TABLE IF NOT EXISTS admin_permissions (
++                user_id INTEGER NOT NULL,
++                permission TEXT NOT NULL,
++                granted_by INTEGER,
++                created_at TEXT NOT NULL,
++                PRIMARY KEY (user_id, permission)
++            )
++            """
++        )
++
++
++def has_admin_permission(user_id: int, permission: str) -> bool:
++    roles = get_admin_roles(int(user_id))
++    if any(r["role"] == "SUPER_ADMIN" for r in roles):
++        return True
++    if not roles:
++        return False
++    ensure_admin_permissions_table()
++    with get_conn() as conn:
++        row = conn.execute(
++            "SELECT 1 FROM admin_permissions WHERE user_id = ? AND permission = ?",
++            (int(user_id), permission),
++        ).fetchone()
++    return row is not None
++
++
++def set_admin_permission(user_id: int, permission: str, enabled: bool, granted_by: int = None) -> None:
++    import datetime as _dt
++    ensure_admin_permissions_table()
++    with get_conn() as conn:
++        if enabled:
++            conn.execute(
++                "INSERT OR IGNORE INTO admin_permissions (user_id, permission, granted_by, created_at) VALUES (?, ?, ?, ?)",
++                (int(user_id), permission, granted_by, _dt.datetime.now().isoformat(timespec="seconds")),
++            )
++        else:
++            conn.execute(
++                "DELETE FROM admin_permissions WHERE user_id = ? AND permission = ?",
++                (int(user_id), permission),
++            )
++
++
++def list_admin_permissions() -> list:
++    ensure_admin_permissions_table()
++    with get_conn() as conn:
++        rows = conn.execute(
++            "SELECT user_id, permission FROM admin_permissions ORDER BY user_id, permission"
++        ).fetchall()
++    return [(r["user_id"], r["permission"]) for r in rows]
++
++
++def get_user_ids_for_term(term_name: str = None) -> list:
++    """گیرندگان: همه‌ی کاربران (term_name=None) یا فقط کسانی که ترمشان دقیقاً همین است."""
++    with get_conn() as conn:
++        if term_name is None:
++            rows = conn.execute("SELECT user_id FROM users").fetchall()
++        else:
++            rows = conn.execute("SELECT user_id FROM users WHERE class_program = ?", (term_name,)).fetchall()
++    return [r["user_id"] for r in rows]
++
++
++# ============================================================
++# لینکِ اشتراکِ «برنامه مطالعه شخصی» -- عکس‌فوری (snapshot) با توکنِ تصادفیِ قابل‌لغو.
++# snapshot فقط روز/ساعت/درس دارد؛ نه نام، نه آیدی. owner_id فقط برای لغو/به‌روزرسانیِ
++# خودِ صاحب نگه‌داری می‌شود و هیچ‌وقت به بیننده نشان داده نمی‌شود.
++# ============================================================
++
++def ensure_schedule_shares_table() -> None:
++    with get_conn() as conn:
++        conn.execute(
++            """
++            CREATE TABLE IF NOT EXISTS schedule_shares (
++                token TEXT PRIMARY KEY,
++                owner_id INTEGER NOT NULL,
++                snapshot TEXT NOT NULL,
++                created_at TEXT NOT NULL,
++                revoked INTEGER NOT NULL DEFAULT 0
++            )
++            """
++        )
++        conn.execute("CREATE INDEX IF NOT EXISTS idx_schedule_shares_owner ON schedule_shares(owner_id, revoked)")
++
++
++def create_schedule_share(owner_id: int, snapshot_json: str) -> str:
++    """لینکِ فعالِ قبلیِ همین کاربر لغو می‌شود و توکنِ جدید برمی‌گردد (هر کاربر حداکثر یک لینکِ فعال)."""
++    import datetime as _dt
++    import secrets as _secrets
++    ensure_schedule_shares_table()
++    token = _secrets.token_urlsafe(9)  # ۱۲ نویسه از [A-Za-z0-9_-]
++    with get_conn() as conn:
++        conn.execute("UPDATE schedule_shares SET revoked = 1 WHERE owner_id = ? AND revoked = 0", (int(owner_id),))
++        conn.execute(
++            "INSERT INTO schedule_shares (token, owner_id, snapshot, created_at, revoked) VALUES (?, ?, ?, ?, 0)",
++            (token, int(owner_id), snapshot_json, _dt.datetime.now().isoformat(timespec="seconds")),
++        )
++    return token
++
++
++def get_active_schedule_share_snapshot(token: str):
++    """snapshot (JSON string) یا None اگر توکن نامعتبر/لغوشده باشد. هویتِ صاحب برنمی‌گردد."""
++    ensure_schedule_shares_table()
++    with get_conn() as conn:
++        row = conn.execute(
++            "SELECT snapshot FROM schedule_shares WHERE token = ? AND revoked = 0", (token,)
++        ).fetchone()
++    return row["snapshot"] if row else None
++
++
++def has_active_schedule_share(owner_id: int) -> bool:
++    ensure_schedule_shares_table()
++    with get_conn() as conn:
++        row = conn.execute(
++            "SELECT 1 FROM schedule_shares WHERE owner_id = ? AND revoked = 0", (int(owner_id),)
++        ).fetchone()
++    return row is not None
++
++
++def revoke_schedule_shares(owner_id: int) -> int:
++    ensure_schedule_shares_table()
++    with get_conn() as conn:
++        cur = conn.execute("UPDATE schedule_shares SET revoked = 1 WHERE owner_id = ? AND revoked = 0", (int(owner_id),))
++        return cur.rowcount
++
++
++# ============================================================
++# اتاق مطالعه: بازه‌های ۹۰ دقیقه‌ای روزانه، ثبت‌نام، و اتاق‌های شخصی
++# جدول‌های جدید و مستقل‌اند؛ هیچ جدولِ قبلی تغییر نمی‌کند.
++# ============================================================
++
++STUDY_SLOTS_META_KEY = "study_slots"
++DEFAULT_STUDY_SLOTS = ["08:00", "10:00", "16:00", "18:00"]  # قابل‌تغییر توسط سوپرادمین (/studyslots)
++STUDY_SLOT_MINUTES = 90
++
++
++def ensure_study_tables() -> None:
++    with get_conn() as conn:
++        conn.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS study_slot_signups (
++                slot_date TEXT NOT NULL,
++                slot_index INTEGER NOT NULL,
++                user_id INTEGER NOT NULL,
++                status TEXT NOT NULL DEFAULT 'joined',
++                joined_at TEXT NOT NULL,
++                updated_at TEXT NOT NULL,
++                PRIMARY KEY (slot_date, slot_index, user_id)
++            );
++            CREATE TABLE IF NOT EXISTS personal_study_rooms (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                owner_id INTEGER NOT NULL,
++                term_name TEXT NOT NULL,
++                link TEXT NOT NULL,
++                message TEXT NOT NULL DEFAULT '',
++                recipients INTEGER NOT NULL DEFAULT 0,
++                created_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS idx_personal_study_rooms_owner ON personal_study_rooms(owner_id, created_at);
++            """
++        )
++
++
++def _valid_hhmm(v: str) -> bool:
++    import re as _re
++    m = _re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", (v or "").strip())
++    return bool(m)
++
++
++def get_study_slots() -> list:
++    """چهار زمانِ شروعِ روزانه ('HH:MM')؛ اگر تنظیم نشده یا خراب بود، پیش‌فرض."""
++    with get_conn() as conn:
++        raw = _meta_get(conn, STUDY_SLOTS_META_KEY, "")
++    slots = [x.strip() for x in (raw or "").split(",") if x.strip()]
++    if len(slots) == 4 and all(_valid_hhmm(x) for x in slots):
++        return slots
++    return list(DEFAULT_STUDY_SLOTS)
++
++
++def set_study_slots(slots: list) -> bool:
++    slots = [str(x).strip() for x in slots]
++    if len(slots) != 4 or not all(_valid_hhmm(x) for x in slots) or slots != sorted(slots) or len(set(slots)) != 4:
++        return False
++    with get_conn() as conn:
++        _meta_set(conn, STUDY_SLOTS_META_KEY, ",".join(slots))
++    return True
++
++
++def join_study_slot(user_id: int, slot_date: str, slot_index: int) -> str:
++    """'joined' (ثبت‌نامِ تازه) | 'already' (قبلاً ثبت‌نام بوده؛ هیچ ردیفِ تکراری ساخته نمی‌شود)."""
++    import datetime as _dt
++    ensure_study_tables()
++    now = _dt.datetime.now().isoformat(timespec="seconds")
++    with get_conn() as conn:
++        row = conn.execute(
++            "SELECT status FROM study_slot_signups WHERE slot_date = ? AND slot_index = ? AND user_id = ?",
++            (slot_date, slot_index, int(user_id)),
++        ).fetchone()
++        if row and row["status"] == "joined":
++            return "already"
++        if row:
++            conn.execute(
++                "UPDATE study_slot_signups SET status = 'joined', updated_at = ? "
++                "WHERE slot_date = ? AND slot_index = ? AND user_id = ?",
++                (now, slot_date, slot_index, int(user_id)),
++            )
++        else:
++            conn.execute(
++                "INSERT INTO study_slot_signups (slot_date, slot_index, user_id, status, joined_at, updated_at) "
++                "VALUES (?, ?, ?, 'joined', ?, ?)",
++                (slot_date, slot_index, int(user_id), now, now),
++            )
++    return "joined"
++
++
++def cancel_study_slot(user_id: int, slot_date: str, slot_index: int) -> bool:
++    import datetime as _dt
++    ensure_study_tables()
++    with get_conn() as conn:
++        cur = conn.execute(
++            "UPDATE study_slot_signups SET status = 'cancelled', updated_at = ? "
++            "WHERE slot_date = ? AND slot_index = ? AND user_id = ? AND status = 'joined'",
++            (_dt.datetime.now().isoformat(timespec="seconds"), slot_date, slot_index, int(user_id)),
++        )
++        return cur.rowcount > 0
++
++
++def study_slot_counts(slot_date: str) -> dict:
++    ensure_study_tables()
++    with get_conn() as conn:
++        rows = conn.execute(
++            "SELECT slot_index, COUNT(*) AS n FROM study_slot_signups "
++            "WHERE slot_date = ? AND status = 'joined' GROUP BY slot_index",
++            (slot_date,),
++        ).fetchall()
++    return {r["slot_index"]: r["n"] for r in rows}
++
++
++def user_study_slots(user_id: int, slot_date: str) -> set:
++    ensure_study_tables()
++    with get_conn() as conn:
++        rows = conn.execute(
++            "SELECT slot_index FROM study_slot_signups WHERE slot_date = ? AND user_id = ? AND status = 'joined'",
++            (slot_date, int(user_id)),
++        ).fetchall()
++    return {r["slot_index"] for r in rows}
++
++
++def personal_room_limits(owner_id: int, min_gap_minutes: int = 30, max_per_day: int = 3) -> tuple:
++    """(allowed: bool, reason_minutes_left: int). بر اساس تاریخچه‌ی ثبت‌شده در DB (بعد از ری‌استارت هم برقرار است)."""
++    import datetime as _dt
++    ensure_study_tables()
++    now = _dt.datetime.now()
++    with get_conn() as conn:
++        rows = conn.execute(
++            "SELECT created_at FROM personal_study_rooms WHERE owner_id = ? ORDER BY id DESC LIMIT 20",
++            (int(owner_id),),
++        ).fetchall()
++    times = []
++    for r in rows:
++        try:
++            times.append(_dt.datetime.fromisoformat(r["created_at"]))
++        except ValueError:
++            continue
++    if times:
++        gap = (now - times[0]).total_seconds() / 60.0
++        if gap < min_gap_minutes:
++            return False, int(min_gap_minutes - gap) + 1
++    if sum(1 for t in times if (now - t).total_seconds() < 86400) >= max_per_day:
++        return False, -1
++    return True, 0
++
++
++def add_personal_study_room(owner_id: int, term_name: str, link: str, message: str, recipients: int) -> int:
++    import datetime as _dt
++    ensure_study_tables()
++    with get_conn() as conn:
++        cur = conn.execute(
++            "INSERT INTO personal_study_rooms (owner_id, term_name, link, message, recipients, created_at) VALUES (?, ?, ?, ?, ?, ?)",
++            (int(owner_id), term_name, link, message, int(recipients), _dt.datetime.now().isoformat(timespec="seconds")),
++        )
++        return cur.lastrowid
+--- proj/mybot-main/channel_export.py	2026-10-25 05:09:17.000000000 +0000
++++ work/mybot-main/channel_export.py	2026-10-26 19:29:55.596116477 +0000
+@@ -29,6 +29,13 @@
+ 
+ _running = False
+ 
++# ---- انتشار خودکارِ تک‌فایل (بعد از آپلود/تأیید) -----------------------------
++# از همان لاگِ `channel_export_log.json` استفاده می‌کند تا یک فایل هرگز دوبار
++# (نه توسطِ این مسیر، نه توسطِ /exportchannel) منتشر نشود. فایل‌های ناموفق در
++# `channel_publish_failed.json` نگه داشته می‌شوند تا با /retrychannel دوباره تلاش شود.
++FAILED_PATH = os.path.join(_data_dir, "channel_publish_failed.json")
++_publish_lock = asyncio.Lock()
++
+ 
+ def _hashtag(text: str) -> str:
+     t = re.sub(r"[^\w\s]", "", text or "", flags=re.UNICODE).strip()
+@@ -210,3 +217,127 @@
+ 
+ def is_running() -> bool:
+     return _running
++
++
++# ============================================================
++# انتشار خودکارِ یک فایل پس از ثبتِ موفق
++# ============================================================
++
++def _load_failed() -> dict:
++    try:
++        with open(FAILED_PATH, "r", encoding="utf-8") as f:
++            data = json.load(f)
++        return data if isinstance(data, dict) else {}
++    except Exception:
++        return {}
++
++
++def _save_failed(failed: dict) -> None:
++    tmp = FAILED_PATH + ".tmp"
++    with open(tmp, "w", encoding="utf-8") as f:
++        json.dump(failed, f, ensure_ascii=False)
++    os.replace(tmp, FAILED_PATH)
++
++
++def failed_count() -> int:
++    return len(_load_failed())
++
++
++def failed_fids() -> list:
++    return list(_load_failed().keys())
++
++
++def _log_is_readable() -> bool:
++    """اگر فایلِ لاگ هست ولی خراب است، روی آن نمی‌نویسیم (تا تاریخچه‌ی انتشار از بین نرود)."""
++    if not os.path.exists(LOG_PATH):
++        return True
++    try:
++        with open(LOG_PATH, "r", encoding="utf-8") as f:
++            json.load(f)
++        return True
++    except Exception:
++        return False
++
++
++def get_file_row(fid: str):
++    with dbmod.get_conn() as conn:
++        row = conn.execute(
++            """
++            SELECT f.fid, f.type, f.file_id, f.url, f.caption, f.description, f.content,
++                   c.name AS course, t.name AS term, g.name AS grp,
++                   cat.name AS category, sg.name AS subgroup
++            FROM course_files f
++            JOIN courses c ON c.id = f.course_id
++            JOIN terms t ON t.id = c.term_id
++            JOIN groups g ON g.id = t.group_id
++            JOIN categories cat ON cat.id = f.category_id
++            LEFT JOIN course_file_groups sg ON sg.id = f.group_id
++            WHERE f.fid = ?
++            """,
++            (fid,),
++        ).fetchone()
++    return dict(row) if row else None
++
++
++def _build_message(row: dict) -> tuple:
++    """(kind, text) -- kind: 'document' یا 'message'. شامل درس/ترم/گروه/دسته/استاد(زیرگروه) و هشتگ."""
++    cap = (row["caption"] or "").strip()
++    place = f"{row['grp']} › {row['term']} › {row['course']} › {row['category']}"
++    if row["subgroup"]:
++        place += f" › {row['subgroup']}"
++    tags = " ".join(x for x in (_hashtag(row["term"]), _hashtag(row["course"]), _hashtag(row["category"])) if x)
++    tail = f"\n\n📚 {place}\n{tags}".rstrip()
++    ftype = row["type"]
++    if ftype == "link":
++        return "message", f"🔗 {cap}\n{row['url']}{tail}"[:4000]
++    if ftype in ("text", "note"):
++        body = row["content"] or cap
++        head = f"📝 {cap}\n\n{body}" if cap and ftype == "note" else body
++        return "message", f"{head}{tail}"[:4000]
++    desc = (row["description"] or "").strip()
++    head = cap + (f"\n\n📝 {desc}" if desc else "")
++    budget = max(0, 1024 - len(tail))
++    return "document", head[:budget] + tail
++
++
++async def publish_one(bot, fid: str) -> str:
++    """نتیجه: sent | already | deferred | failed | missing.
++
++    - فایلِ ناقص/بدونِ ثبتِ موفق در DB (missing) هرگز منتشر نمی‌شود.
++    - اگر export سراسری در حال اجراست، چیزی نمی‌فرستیم (deferred)؛ خودِ export این فایل را
++      چون در لاگ نیست می‌فرستد.
++    - شکستِ ارسال، فایل/دیتابیس را تغییر نمی‌دهد؛ فقط در failed-log ثبت می‌شود.
++    """
++    async with _publish_lock:
++        if _running:
++            return "deferred"
++        if not _log_is_readable():
++            return "failed"
++        sent = _load_log()
++        failed = _load_failed()
++        if fid in sent:
++            if fid in failed:
++                failed.pop(fid, None)
++                _save_failed(failed)
++            return "already"
++        row = get_file_row(fid)
++        if not row:
++            return "missing"
++        try:
++            kind, text = _build_message(row)
++            if kind == "document":
++                if not row["file_id"]:
++                    return "missing"
++                await _send(lambda: bot.send_document(ARCHIVE_CHANNEL_ID, row["file_id"], caption=text))
++            else:
++                await _send(lambda: bot.send_message(ARCHIVE_CHANNEL_ID, text))
++        except TelegramError as e:
++            failed[fid] = str(e)[:200]
++            _save_failed(failed)
++            return "failed"
++        sent.add(fid)
++        _save_log(sent)
++        if fid in failed:
++            failed.pop(fid, None)
++            _save_failed(failed)
++        return "sent"
+--- proj/mybot-main/MedVerse_Guide.html	2026-10-25 05:09:17.000000000 +0000
++++ work/mybot-main/MedVerse_Guide.html	2026-10-26 19:21:41.678711316 +0000
+@@ -237,12 +237,12 @@
+       <tr><td>☕ گپ دوستانه</td><td>یادآوری کوتاه وقتی گپ دوستانه فعال است</td></tr>
+       <tr><td>🟢 روشن‌شدنِ ربات</td><td>وقتی ربات بعد از خاموشی دوباره فعال می‌شود</td></tr>
+       <tr><td>🏫 تغییرِ برنامه‌ی کلاسیِ ترم خودم</td><td>افزودن، حذف، تغییر گروه یا لغو یک کلاس در ترم خودت</td></tr>
+-      <tr><td>⏰ یادآوریِ قبل از شروعِ کلاس</td><td>۱۰ دقیقه پیش از هر کلاس رسمی؛ پیش‌فرض روشن</td></tr>
++      <tr><td>⏰ یادآوریِ قبل از شروعِ کلاس</td><td>۱۵ دقیقه پیش از هر کلاس رسمی؛ پیش‌فرض روشن</td></tr>
+     </tbody>
+   </table></div>
+   <p>اگر هنوز ترمی انتخاب نکرده باشی، بالای همین منو یک دکمه‌ی «🔁 انتخاب ترم» هم می‌بینی، چون «فایل جدید» و «گپ امتحانی» بدون ترم مشخص، معنایی ندارند.</p>
+   <div class="note tip"><strong>یادآوری کلاس را می‌توانی جدا خاموش کنی</strong>
+-    این گزینه از باقی گزینه‌ها مستقل است. اگر فقط نمی‌خواهی ۱۰ دقیقه قبل از کلاس پیام بگیری، فقط همین یکی را خاموش کن؛ بقیه‌ی اطلاع‌رسانی‌ها دست‌نخورده می‌مانند.
++    این گزینه از باقی گزینه‌ها مستقل است. اگر فقط نمی‌خواهی ۱۵ دقیقه قبل از کلاس پیام بگیری، فقط همین یکی را خاموش کن؛ بقیه‌ی اطلاع‌رسانی‌ها دست‌نخورده می‌مانند.
+   </div>
+ </section>
+ 
+@@ -256,7 +256,7 @@
+ 
+   <h3>🏫 برنامه کلاس‌ها (رسمی)</h3>
+   <p>برنامه‌ی هفتگی کلاس‌های ترمت را روز‌به‌روز یا با دکمه‌ی «📆 کل هفته یکجا» می‌بینی. اگر درسی گروه‌بندی دارد و تو گروهت را مشخص نکرده باشی، آن درس با علامت ⚠️ «گروهت مشخص نیست» دیده می‌شود؛ برای رفعش به «👥 گروه‌های عملی من» برو.</p>
+-  <p>۱۰ دقیقه پیش از هر کلاس رسمی که گروه آن مشخص باشد، اگر گزینه‌ی مربوطه در «🔔 اطلاع‌رسانی» روشن باشد، یادآوری می‌گیری.</p>
++  <p>۱۵ دقیقه پیش از هر کلاس رسمی که گروه آن مشخص باشد، اگر گزینه‌ی مربوطه در «🔔 اطلاع‌رسانی» روشن باشد، یادآوری می‌گیری.</p>
+ 
+   <h3>👥 گروه‌های عملی من</h3>
+   <p>در درس‌هایی که کلاس عملی یا کارگاهی به چند گروه تقسیم شده، از این بخش گروه خودت را انتخاب می‌کنی (مثلاً «گروه ۱، چهارشنبه ۱۰:۰۰ تا ۱۲:۰۰»). بعد از انتخاب، برنامه و یادآوری‌های کلاسی‌ات فقط طبق همان گروه فیلتر می‌شود.</p>
+--- /dev/null	2026-10-26 23:30:13.350092660 +0000
++++ work/mybot-main/zipper.py	2026-10-27 04:48:00.525456467 +0000
+@@ -0,0 +1,278 @@
++"""📦 دانلود همه‌ی فایل‌های یک محدوده (درس / دسته / استاد) به‌صورت ZIP.
++
++اصول:
++- فقط خواندن: هیچ جدول/فایلی در DB تغییر نمی‌کند؛ فایل‌ها با file_id تلگرام نگه‌داری می‌شوند و
++  اینجا یکی‌یکی دانلود، در ZIP نوشته و بعد از ارسال حذف می‌شوند.
++- محدودیت‌های Bot API: دانلودِ هر فایل تا ۲۰MB، ارسالِ هر ZIP تا ۵۰MB. اگر مجموع زیاد بود چند ZIP
++  پشت‌هم ارسال می‌شود (هر بخش ≤ ۴۵MB) و فایل‌های >۲۰MB در گزارشِ «ارسال نشد» می‌آیند.
++- منابع: فقط یک کار هم‌زمان (Semaphore)، یک درخواستِ هم‌زمان برای هر کاربر، حداکثر ~۱۱۰MB روی دیسک
++  (یک بخش + فایلِ در حالِ دانلود)، پوشه‌ی موقت همیشه پاک می‌شود.
++- متن/نوت/لینک‌ها (که فایل نیستند) در یک README.txt داخل ZIP می‌آیند.
++"""
++import asyncio
++import logging
++import os
++import re
++import tempfile
++import time
++import zipfile
++
++from telegram.error import TelegramError
++
++import db as dbmod
++
++logger = logging.getLogger(__name__)
++
++MAX_PART_BYTES = 45 * 1024 * 1024      # زیر سقفِ ۵۰MB ارسالِ ربات
++MAX_SINGLE_BYTES = 20 * 1024 * 1024    # سقفِ دانلودِ Bot API
++MAX_TOTAL_BYTES = 400 * 1024 * 1024    # سقفِ کلِ یک درخواست
++MAX_FILES = 150
++MAX_WAITING = 3
++USER_COOLDOWN_SECONDS = 90
++
++_semaphore = asyncio.Semaphore(1)
++_waiting = 0
++active_users: set = set()
++_last_request: dict = {}
++
++_EMOJI_RE = re.compile("[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\u2b00-\u2bff\ufe0f\u200d\u200c]")
++_BAD_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
++
++
++def clean_name(name: str, default: str = "بدون‌نام", maxlen: int = 60) -> str:
++    n = _EMOJI_RE.sub("", name or "")
++    n = _BAD_RE.sub(" ", n)
++    n = re.sub(r"\s+", " ", n).strip(" .")
++    return (n[:maxlen].strip(" .")) or default
++
++
++def unique_path(used: set, folder: str, base: str, ext: str) -> str:
++    """مسیرِ داخلِ ZIP؛ اگر تکراری بود « (2)»، « (3)»… اضافه می‌شود تا چیزی روی هم نوشته نشود."""
++    prefix = f"{folder}/" if folder else ""
++    candidate = f"{prefix}{base}{ext}"
++    i = 2
++    while candidate.lower() in used:
++        candidate = f"{prefix}{base} ({i}){ext}"
++        i += 1
++    used.add(candidate.lower())
++    return candidate
++
++
++def cooldown_remaining(user_id: int) -> int:
++    last = _last_request.get(user_id)
++    if not last:
++        return 0
++    return max(0, int(USER_COOLDOWN_SECONDS - (time.monotonic() - last)))
++
++
++def mark_request(user_id: int) -> None:
++    _last_request[user_id] = time.monotonic()
++
++
++def busy() -> bool:
++    return _waiting >= MAX_WAITING
++
++
++def collect(scope: str, ids: list):
++    """(title, rows) یا (None, []) اگر محدوده وجود ندارد. فقط همان محدوده‌ی خواسته‌شده برمی‌گردد."""
++    with dbmod.get_conn() as conn:
++        course = conn.execute(
++            "SELECT c.id, c.name, t.name AS term FROM courses c JOIN terms t ON t.id = c.term_id WHERE c.id = ?",
++            (ids[0],),
++        ).fetchone()
++        if not course:
++            return None, []
++        title = course["name"]
++        where, params = "f.course_id = ?", [ids[0]]
++        if scope in ("cat", "grp"):
++            cat = conn.execute("SELECT id, name, course_id FROM categories WHERE id = ?", (ids[1],)).fetchone()
++            if not cat or cat["course_id"] != ids[0]:
++                return None, []
++            where += " AND f.category_id = ?"
++            params.append(ids[1])
++            title = f"{course['name']} - {cat['name']}"
++        if scope == "grp":
++            grp = conn.execute(
++                "SELECT id, name, course_id, category_id FROM course_file_groups WHERE id = ?", (ids[2],)
++            ).fetchone()
++            if not grp or grp["course_id"] != ids[0] or grp["category_id"] != ids[1]:
++                return None, []
++            where += " AND f.group_id = ?"
++            params.append(ids[2])
++            title = f"{title} - {grp['name']}"
++        rows = conn.execute(
++            f"""
++            SELECT f.fid, f.type, f.file_id, f.url, f.caption, f.content,
++                   cat.name AS category, sg.name AS grp
++            FROM course_files f
++            JOIN categories cat ON cat.id = f.category_id
++            LEFT JOIN course_file_groups sg ON sg.id = f.group_id
++            WHERE {where}
++            ORDER BY cat.sort_order, cat.id, COALESCE(sg.sort_order, -1), sg.id, f.sort_order, f.id
++            """,
++            params,
++        ).fetchall()
++    return clean_name(title, "MedVerse"), [dict(r) for r in rows]
++
++
++def _folder_for(scope: str, row: dict) -> str:
++    parts = []
++    if scope == "crs":
++        parts.append(clean_name(row["category"], "دسته"))
++    if scope in ("crs", "cat") and row.get("grp"):
++        parts.append(clean_name(row["grp"], "گروه"))
++    return "/".join(parts)
++
++
++def _build_readme(scope: str, rows: list) -> str:
++    lines = ["MedVerse — متن‌ها، نوت‌ها و لینک‌ها", "=" * 36, ""]
++    for r in rows:
++        where = " / ".join(x for x in (r["category"], r.get("grp")) if x)
++        lines.append(f"[{where}] {r['caption']}".strip())
++        if r["type"] == "link":
++            lines.append(f"  {r['url']}")
++        else:
++            lines.append((r.get("content") or "").strip())
++        lines.append("")
++    return "\n".join(lines)
++
++
++async def _send_part(bot, chat_id: int, path: str, filename: str, caption: str) -> None:
++    for attempt in range(2):
++        try:
++            with open(path, "rb") as fh:
++                await bot.send_document(
++                    chat_id, fh, filename=filename, caption=caption,
++                    read_timeout=240, write_timeout=240, connect_timeout=30,
++                )
++            return
++        except TelegramError as e:
++            if attempt == 1 or "retry" not in type(e).__name__.lower():
++                raise
++            await asyncio.sleep(float(getattr(e, "retry_after", 2)) + 1)
++
++
++async def run_zip_job(bot, chat_id: int, scope: str, ids: list) -> dict:
++    """نتیجه: {'status': 'ok'|'empty'|'missing'|'busy'|'too_many'|'send_failed', 'parts', 'included', 'skipped': [(نام، دلیل)]}"""
++    global _waiting
++    title, rows = collect(scope, ids)
++    if title is None:
++        return {"status": "missing", "parts": 0, "included": 0, "skipped": []}
++    if not rows:
++        return {"status": "empty", "parts": 0, "included": 0, "skipped": []}
++    files = [r for r in rows if r["type"] == "file" and r["file_id"]]
++    texts = [r for r in rows if not (r["type"] == "file" and r["file_id"])]
++    if len(files) > MAX_FILES:
++        return {"status": "too_many", "parts": 0, "included": 0, "skipped": [], "count": len(files)}
++    if _waiting >= MAX_WAITING:
++        return {"status": "busy", "parts": 0, "included": 0, "skipped": []}
++
++    _waiting += 1
++    try:
++        async with _semaphore:
++            return await _build_and_send(bot, chat_id, scope, title, files, texts)
++    finally:
++        _waiting -= 1
++
++
++async def _build_and_send(bot, chat_id: int, scope: str, title: str, files: list, texts: list) -> dict:
++    skipped, included, parts_sent = [], 0, 0
++    used_names: set = set()
++    total = 0
++    state = {"zf": None, "path": None, "bytes": 0, "count": 0}
++
++    with tempfile.TemporaryDirectory(prefix="mvzip_") as tmp:
++        def open_part(n: int) -> None:
++            state["path"] = os.path.join(tmp, f"part{n}.zip")
++            state["zf"] = zipfile.ZipFile(state["path"], "w", zipfile.ZIP_STORED, allowZip64=True)
++            state["bytes"], state["count"] = 0, 0
++
++        async def close_and_send(n: int) -> bool:
++            nonlocal parts_sent
++            zf = state["zf"]
++            if zf is None:
++                return True
++            await asyncio.to_thread(zf.close)
++            state["zf"] = None
++            if state["count"] == 0:
++                os.remove(state["path"])
++                return True
++            fname = f"{title}.zip" if n == 1 else f"{title}_part{n}.zip"
++            cap = f"📦 {title}" + (f" — بخش {n}" if n > 1 or parts_sent else "")
++            try:
++                await _send_part(bot, chat_id, state["path"], fname, cap)
++            except TelegramError:
++                logger.exception("ارسالِ ZIP ناموفق بود")
++                return False
++            finally:
++                try:
++                    os.remove(state["path"])
++                except OSError:
++                    pass
++            parts_sent += 1
++            return True
++
++        part_no = 1
++        open_part(part_no)
++        try:
++            if texts:
++                readme = _build_readme(scope, texts).encode("utf-8")
++                await asyncio.to_thread(state["zf"].writestr, "README.txt", readme)
++                used_names.add("readme.txt")
++                state["bytes"] += len(readme)
++                state["count"] += 1
++
++            for idx, r in enumerate(files):
++                label = r["caption"] or r["fid"]
++                if total >= MAX_TOTAL_BYTES:
++                    skipped.append((label, "سقفِ حجمِ کلِ درخواست"))
++                    continue
++                dl_path = os.path.join(tmp, f"dl_{idx}")
++                try:
++                    tf = await bot.get_file(r["file_id"])
++                    size = getattr(tf, "file_size", None) or 0
++                    if size > MAX_SINGLE_BYTES:
++                        skipped.append((label, "بزرگ‌تر از ۲۰MB (محدودیت تلگرام)"))
++                        continue
++                    ext = os.path.splitext(getattr(tf, "file_path", "") or "")[1][:8]
++                    await tf.download_to_drive(custom_path=dl_path)
++                    size = os.path.getsize(dl_path)
++                except TelegramError as e:
++                    skipped.append((label, "دانلود نشد: " + str(e)[:60]))
++                    continue
++                except Exception:
++                    logger.exception("خطا در دانلودِ فایل برای ZIP")
++                    skipped.append((label, "خطای دانلود"))
++                    continue
++
++                if state["bytes"] + size > MAX_PART_BYTES and state["count"] > 0:
++                    if not await close_and_send(part_no):
++                        return {"status": "send_failed", "parts": parts_sent, "included": included, "skipped": skipped}
++                    part_no += 1
++                    open_part(part_no)
++                arc = unique_path(used_names, _folder_for(scope, r), clean_name(label), ext)
++                try:
++                    await asyncio.to_thread(state["zf"].write, dl_path, arc)
++                except Exception:
++                    logger.exception("خطا در نوشتنِ فایل داخل ZIP")
++                    skipped.append((label, "خطای فشرده‌سازی"))
++                    continue
++                finally:
++                    try:
++                        os.remove(dl_path)
++                    except OSError:
++                        pass
++                state["bytes"] += size
++                state["count"] += 1
++                included += 1
++                total += size
++
++            if not await close_and_send(part_no):
++                return {"status": "send_failed", "parts": parts_sent, "included": included, "skipped": skipped}
++        finally:
++            if state["zf"] is not None:
++                try:
++                    state["zf"].close()
++                except Exception:
++                    pass
++    return {"status": "ok", "parts": parts_sent, "included": included, "skipped": skipped, "texts": len(texts)}
+--- /dev/null	2026-10-26 23:30:13.350092660 +0000
++++ work/mybot-main/market.py	2026-10-27 09:52:01.809751610 +0000
+@@ -0,0 +1,1354 @@
++"""📚 بازارچه کتاب و جزوه (مرحله‌ی الف + ب: گزارش تخلف، بررسی توسط ناظر، عکسِ اختیاری).
++
++- آگهی (فروش / واگذاری رایگان / امانت‌دادن) و درخواست (خرید / امانت‌گرفتن / دریافت رایگان)، با
++  دسته‌بندی ترم ← درس ← منبع از ساختار واقعی ترم/درس‌های دیتابیس.
++- گفت‌وگو فقط از طریق ربات (رله): هر گفت‌وگو به یک آگهی/درخواست و یک نفرِ پاسخ‌دهنده وصل است؛ پیام‌ها
++  با شناسه‌ی گفت‌وگو جدا می‌شوند. هیچ نام/آیدی/شماره‌ای برای طرف مقابل نمایش داده نمی‌شود.
++- قبل از شروعِ گفت‌وگو، پاسخ‌دهنده یک جمله‌ی «دلیل و قصد» می‌نویسد و صاحبِ آگهی می‌پذیرد/رد می‌کند.
++  برای «درخواست»‌ها، درخواست‌کننده هم هنگام پذیرش یک جمله‌ی تأیید می‌نویسد.
++- جدول‌های جدید و مستقل؛ هیچ آگهی/گفت‌وگو حذف نمی‌شود (فقط وضعیت عوض می‌شود).
++- پرداخت در ربات نیست؛ تحویل و معامله با خودِ دانشجوهاست.
++"""
++import logging
++import re
++import secrets
++import time
++import datetime as _dt
++
++from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
++from telegram.error import BadRequest, Forbidden, TelegramError
++from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler,
++                          ContextTypes, MessageHandler, filters)
++
++import db as dbmod
++
++logger = logging.getLogger(__name__)
++
++KIND_AD, KIND_REQ = "ad", "request"
++AD_TYPES = {"sell": "💰 فروش", "free": "🎁 واگذاری رایگان", "lend": "🔄 امانت‌دادن"}
++REQ_TYPES = {"buy": "💰 خرید", "borrow": "🔄 امانت‌گرفتن", "free": "🎁 دریافت رایگان"}
++CONDITIONS = {
++    "new": "نو", "like_new": "در حد نو", "used": "کارکرده (سالم)",
++    "marked": "کارکرده با یادداشت/هایلایت", "handwritten": "جزوه‌ی دست‌نویس", "digital": "فایل دیجیتال",
++}
++STATUSES = ("available", "negotiating", "gone", "closed")
++ACTIVE_STATUSES = ("available", "negotiating")
++_ST_SHORT = {"a": "available", "n": "negotiating", "g": "gone", "c": "closed"}
++_ST_SHORT_REV = {v: k for k, v in _ST_SHORT.items()}
++
++MAX_ACTIVE_PER_KIND = 10
++TITLE_MAX, TEACHER_MAX, DESC_MAX, INTENT_MAX, MSG_MAX = 80, 60, 500, 200, 1000
++PRICE_MAX = 50_000_000
++PAGE_SIZE = 8
++MSG_RATE_LIMIT, MSG_RATE_WINDOW = 20, 60  # حداکثر ۲۰ پیام در دقیقه برای هر کاربر
++
++_msg_times: dict = {}
++
++ROOT_TEXT = (
++    "📚 بازارچه کتاب و جزوه\n\n"
++    "خرید، فروش، امانت و واگذاریِ رایگانِ منابع آموزشی بین دانشجوها.\n"
++    "• گفت‌وگو فقط از طریق ربات انجام می‌شود و نام/شماره‌ات به طرف مقابل نمایش داده نمی‌شود.\n"
++    "• تحویل منبع و معامله با خودِ شماست؛ ربات پرداخت انجام نمی‌دهد.\n"
++    "• شماره یا اطلاعات شخصی‌ات را در آگهی ننویس."
++)
++
++
++# ============================================================
++# دیتابیس
++# ============================================================
++
++def _now() -> str:
++    return _dt.datetime.now().isoformat(timespec="seconds")
++
++
++def ensure_tables() -> None:
++    with dbmod.get_conn() as conn:
++        conn.executescript(
++            """
++            CREATE TABLE IF NOT EXISTS market_listings (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                code TEXT NOT NULL UNIQUE,
++                kind TEXT NOT NULL,
++                deal_type TEXT NOT NULL,
++                owner_id INTEGER NOT NULL,
++                term_name TEXT NOT NULL,
++                course_id INTEGER NOT NULL,
++                course_name TEXT NOT NULL,
++                teacher TEXT NOT NULL DEFAULT '',
++                title TEXT NOT NULL,
++                condition TEXT NOT NULL DEFAULT '',
++                price INTEGER,
++                description TEXT NOT NULL DEFAULT '',
++                status TEXT NOT NULL DEFAULT 'available',
++                created_at TEXT NOT NULL,
++                updated_at TEXT NOT NULL,
++                photo_file_id TEXT
++            );
++            CREATE INDEX IF NOT EXISTS idx_market_listings_browse ON market_listings(kind, course_id, status);
++            CREATE INDEX IF NOT EXISTS idx_market_listings_owner ON market_listings(owner_id, kind);
++            CREATE TABLE IF NOT EXISTS market_chats (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                listing_id INTEGER NOT NULL,
++                responder_id INTEGER NOT NULL,
++                owner_id INTEGER NOT NULL,
++                intent TEXT NOT NULL,
++                confirm_text TEXT NOT NULL DEFAULT '',
++                status TEXT NOT NULL DEFAULT 'pending',
++                created_at TEXT NOT NULL,
++                updated_at TEXT NOT NULL,
++                UNIQUE(listing_id, responder_id)
++            );
++            CREATE INDEX IF NOT EXISTS idx_market_chats_users ON market_chats(owner_id, responder_id, status);
++            CREATE TABLE IF NOT EXISTS market_messages (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                chat_id INTEGER NOT NULL,
++                sender_id INTEGER NOT NULL,
++                text TEXT NOT NULL,
++                delivered INTEGER NOT NULL DEFAULT 0,
++                created_at TEXT NOT NULL
++            );
++            CREATE INDEX IF NOT EXISTS idx_market_messages_chat ON market_messages(chat_id, id);
++            CREATE TABLE IF NOT EXISTS market_reports (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                reporter_id INTEGER NOT NULL,
++                target_type TEXT NOT NULL,            -- 'listing' | 'message'
++                target_id INTEGER NOT NULL,           -- شناسه‌ی آگهی یا پیام
++                listing_id INTEGER NOT NULL,
++                chat_id INTEGER,
++                reason TEXT NOT NULL,
++                note TEXT NOT NULL DEFAULT '',
++                status TEXT NOT NULL DEFAULT 'open',  -- open | dismissed | actioned
++                reviewed_by INTEGER,
++                created_at TEXT NOT NULL,
++                reviewed_at TEXT,
++                UNIQUE(reporter_id, target_type, target_id)
++            );
++            CREATE INDEX IF NOT EXISTS idx_market_reports_status ON market_reports(status, id);
++            """
++        )
++        # مهاجرتِ امن برای جدولِ مرحله‌ی الف (ستونِ عکس)
++        cols = {r["name"] for r in conn.execute("PRAGMA table_info(market_listings)").fetchall()}
++        if "photo_file_id" not in cols:
++            conn.execute("ALTER TABLE market_listings ADD COLUMN photo_file_id TEXT")
++
++
++def _rows(sql: str, params=()) -> list:
++    with dbmod.get_conn() as conn:
++        return [dict(r) for r in conn.execute(sql, params).fetchall()]
++
++
++def _row(sql: str, params=()):
++    r = _rows(sql, params)
++    return r[0] if r else None
++
++
++def list_terms() -> list:
++    return _rows(
++        "SELECT t.id, t.name, g.name AS grp FROM terms t JOIN groups g ON g.id = t.group_id "
++        "ORDER BY g.sort_order, g.id, t.sort_order, t.id"
++    )
++
++
++def list_courses_with_counts(term_id: int, kind: str = None) -> list:
++    if kind:
++        return _rows(
++            "SELECT c.id, c.name, (SELECT COUNT(*) FROM market_listings m WHERE m.course_id = c.id "
++            "AND m.kind = ? AND m.status IN ('available','negotiating')) AS n "
++            "FROM courses c WHERE c.term_id = ? ORDER BY c.sort_order, c.id",
++            (kind, term_id),
++        )
++    return _rows("SELECT id, name, 0 AS n FROM courses WHERE term_id = ? ORDER BY sort_order, id", (term_id,))
++
++
++def get_listing(listing_id: int):
++    return _row("SELECT * FROM market_listings WHERE id = ?", (listing_id,))
++
++
++def count_active(owner_id: int, kind: str) -> int:
++    return _row(
++        "SELECT COUNT(*) AS n FROM market_listings WHERE owner_id = ? AND kind = ? AND status IN ('available','negotiating')",
++        (owner_id, kind),
++    )["n"]
++
++
++def create_listing(d: dict, owner_id: int) -> tuple:
++    """(id, code). code شناسه‌ی عمومیِ پایدار است."""
++    ensure_tables()
++    now = _now()
++    with dbmod.get_conn() as conn:
++        for _ in range(8):
++            code = "MV" + secrets.token_hex(3).upper()
++            try:
++                cur = conn.execute(
++                    "INSERT INTO market_listings (code, kind, deal_type, owner_id, term_name, course_id, course_name, "
++                    "teacher, title, condition, price, description, status, created_at, updated_at, photo_file_id) "
++                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'available', ?, ?, ?)",
++                    (code, d["kind"], d["deal_type"], owner_id, d["term_name"], d["course_id"], d["course_name"],
++                     d.get("teacher", ""), d["title"], d.get("condition", ""), d.get("price"), d.get("desc", ""), now, now, d.get("photo")),
++                )
++                return cur.lastrowid, code
++            except Exception as e:  # تصادمِ نادرِ code
++                if "UNIQUE" not in str(e):
++                    raise
++    raise RuntimeError("could not allocate listing code")
++
++
++def browse(kind: str, course_id: int, offset: int, limit: int) -> tuple:
++    where = "kind = ? AND course_id = ? AND status IN ('available','negotiating')"
++    total = _row(f"SELECT COUNT(*) AS n FROM market_listings WHERE {where}", (kind, course_id))["n"]
++    rows = _rows(f"SELECT * FROM market_listings WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
++                 (kind, course_id, limit, offset))
++    return total, rows
++
++
++def user_listings(owner_id: int, kind: str) -> list:
++    return _rows("SELECT * FROM market_listings WHERE owner_id = ? AND kind = ? ORDER BY id DESC LIMIT 30", (owner_id, kind))
++
++
++def set_listing_status(listing_id: int, owner_id: int, status: str) -> bool:
++    """فقط صاحبِ آگهی (شرطِ owner_id در خودِ SQL). حذفِ فیزیکی وجود ندارد."""
++    if status not in STATUSES:
++        return False
++    with dbmod.get_conn() as conn:
++        cur = conn.execute(
++            "UPDATE market_listings SET status = ?, updated_at = ? WHERE id = ? AND owner_id = ?",
++            (status, _now(), listing_id, owner_id),
++        )
++        return cur.rowcount > 0
++
++
++def get_chat(chat_id: int):
++    return _row("SELECT * FROM market_chats WHERE id = ?", (chat_id,))
++
++
++def find_chat(listing_id: int, responder_id: int):
++    return _row("SELECT * FROM market_chats WHERE listing_id = ? AND responder_id = ?", (listing_id, responder_id))
++
++
++def upsert_pending_chat(listing: dict, responder_id: int, intent: str) -> int:
++    """یک ردیف برای هر (آگهی، پاسخ‌دهنده)؛ بعد از «ended» می‌شود دوباره درخواست داد (همان ردیف reset می‌شود)."""
++    now = _now()
++    with dbmod.get_conn() as conn:
++        existing = conn.execute(
++            "SELECT id, status FROM market_chats WHERE listing_id = ? AND responder_id = ?", (listing["id"], responder_id)
++        ).fetchone()
++        if existing:
++            if existing["status"] != "ended":
++                return -1
++            conn.execute(
++                "UPDATE market_chats SET intent = ?, confirm_text = '', status = 'pending', updated_at = ? WHERE id = ?",
++                (intent, now, existing["id"]),
++            )
++            return existing["id"]
++        cur = conn.execute(
++            "INSERT INTO market_chats (listing_id, responder_id, owner_id, intent, status, created_at, updated_at) "
++            "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
++            (listing["id"], responder_id, listing["owner_id"], intent, now, now),
++        )
++        return cur.lastrowid
++
++
++def set_chat_status(chat_id: int, status: str, confirm_text: str = None, only_from: tuple = None) -> bool:
++    sql, params = "UPDATE market_chats SET status = ?, updated_at = ?", [status, _now()]
++    if confirm_text is not None:
++        sql += ", confirm_text = ?"
++        params.append(confirm_text)
++    sql += " WHERE id = ?"
++    params.append(chat_id)
++    if only_from:
++        sql += " AND status IN (" + ",".join("?" * len(only_from)) + ")"
++        params.extend(only_from)
++    with dbmod.get_conn() as conn:
++        return conn.execute(sql, params).rowcount > 0
++
++
++def user_chats(user_id: int) -> list:
++    return _rows(
++        "SELECT c.*, l.title, l.code, l.kind FROM market_chats c JOIN market_listings l ON l.id = c.listing_id "
++        "WHERE (c.owner_id = ? OR c.responder_id = ?) AND c.status IN ('pending','active') ORDER BY c.updated_at DESC LIMIT 30",
++        (user_id, user_id),
++    )
++
++
++def listing_chats(listing_id: int) -> list:
++    return _rows("SELECT * FROM market_chats WHERE listing_id = ? AND status IN ('pending','active') ORDER BY id DESC LIMIT 30",
++                 (listing_id,))
++
++
++def add_message(chat_id: int, sender_id: int, text: str, delivered: bool) -> int:
++    with dbmod.get_conn() as conn:
++        return conn.execute(
++            "INSERT INTO market_messages (chat_id, sender_id, text, delivered, created_at) VALUES (?, ?, ?, ?, ?)",
++            (chat_id, sender_id, text, 1 if delivered else 0, _now()),
++        ).lastrowid
++
++
++# ============================================================
++# کمک‌ها
++# ============================================================
++
++def _norm_digits(s: str) -> str:
++    return s.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
++
++
++def type_label(kind: str, deal_type: str) -> str:
++    return (AD_TYPES if kind == KIND_AD else REQ_TYPES).get(deal_type, deal_type)
++
++
++def status_label(kind: str, status: str) -> str:
++    if kind == KIND_REQ:
++        return {"available": "🟢 فعال", "negotiating": "🟡 در حال هماهنگی", "gone": "✅ انجام‌شده", "closed": "⚫️ بسته‌شده"}[status]
++    return {"available": "🟢 موجود", "negotiating": "🟡 در حال هماهنگی", "gone": "🔴 واگذارشده/ناموجود", "closed": "⚫️ بسته‌شده"}[status]
++
++
++def price_label(l: dict) -> str:
++    if l["kind"] == KIND_AD and l["deal_type"] == "sell":
++        return f"{l['price']:,} تومان" if l.get("price") else "توافقی"
++    return ""
++
++
++def listing_text(l: dict, viewer_is_owner: bool = False) -> str:
++    lines = [f"{'📦 آگهی' if l['kind'] == KIND_AD else '🔎 درخواست'} — {l['title']}", f"کد: {l['code']}", "──────────────",
++             f"نوع: {type_label(l['kind'], l['deal_type'])}", f"ترم/درس: {l['term_name']} › {l['course_name']}"]
++    if l.get("teacher"):
++        lines.append(f"استاد: {l['teacher']}")
++    if l.get("condition"):
++        lines.append(f"وضعیت منبع: {CONDITIONS.get(l['condition'], l['condition'])}")
++    p = price_label(l)
++    if p:
++        lines.append(f"قیمت: {p}")
++    if l.get("description"):
++        lines.append(f"\nتوضیحات: {l['description']}")
++    if l.get("photo_file_id"):
++        lines.append("📷 دارای عکس")
++    lines.append(f"\nوضعیت: {status_label(l['kind'], l['status'])}")
++    return "\n".join(lines)
++
++
++async def _edit(query, text: str, markup=None) -> None:
++    msg = query.message
++    if msg is not None and getattr(msg, "photo", None):
++        # پیامِ عکس‌دار را نمی‌شود به متن تبدیل کرد: پاک و متنِ جدید فرستاده می‌شود
++        try:
++            await msg.delete()
++        except TelegramError:
++            pass
++        await query.get_bot().send_message(chat_id=msg.chat_id, text=text, reply_markup=markup, disable_web_page_preview=True)
++        return
++    try:
++        await query.edit_message_text(text, reply_markup=markup, disable_web_page_preview=True)
++    except BadRequest as e:
++        if "not modified" not in str(e).lower():
++            raise
++
++
++async def _show_listing(query, l: dict, user_id: int) -> None:
++    text, markup = listing_text(l, l["owner_id"] == user_id), _view_markup(l, user_id)
++    if not l.get("photo_file_id"):
++        await _edit(query, text, markup)
++        return
++    if getattr(query.message, "photo", None):
++        try:
++            await query.edit_message_caption(caption=text[:1024], reply_markup=markup)
++        except BadRequest as e:
++            if "not modified" not in str(e).lower():
++                raise
++    else:
++        await query.message.reply_photo(photo=l["photo_file_id"], caption=text[:1024], reply_markup=markup)
++
++
++def clear_state(context: ContextTypes.DEFAULT_TYPE) -> None:
++    for k in ("mk_new", "mk_intent", "mk_confirm", "mchat", "mk_report"):
++        context.user_data.pop(k, None)
++
++
++def _root_markup() -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup([
++        [InlineKeyboardButton("📖 مشاهده آگهی‌ها", callback_data="mk_browse:ad")],
++        [InlineKeyboardButton("📝 ثبت آگهی جدید", callback_data="mk_new:ad")],
++        [InlineKeyboardButton("🔎 مشاهده درخواست‌ها", callback_data="mk_browse:request")],
++        [InlineKeyboardButton("➕ ثبت درخواست جدید", callback_data="mk_new:request")],
++        [InlineKeyboardButton("🗂 آگهی‌های من", callback_data="mk_mine:ad"),
++         InlineKeyboardButton("🗂 درخواست‌های من", callback_data="mk_mine:request")],
++        [InlineKeyboardButton("💬 گفت‌وگوهای من", callback_data="mk_chats")],
++        [InlineKeyboardButton("🚩 گزارش تخلف", callback_data="mk_report_info")],
++    ])
++
++
++async def show_root(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """ورودی از منوی اصلی."""
++    clear_state(context)
++    await update.message.reply_text(ROOT_TEXT, reply_markup=_root_markup())
++
++
++async def cb_root(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    await query.answer()
++    clear_state(context)
++    await _edit(query, ROOT_TEXT, _root_markup())
++
++
++def _back(cb: str = "mk_root") -> list:
++    return [InlineKeyboardButton("🔙 بازگشت", callback_data=cb)]
++
++
++# ============================================================
++# مشاهده: ترم ← درس ← فهرست
++# ============================================================
++
++async def cb_browse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    kind = query.data.split(":", 1)[1]
++    if kind not in (KIND_AD, KIND_REQ):
++        await query.answer()
++        return
++    await query.answer()
++    buttons = [[InlineKeyboardButton(f"{t['grp']} › {t['name']}", callback_data=f"mkb_t:{kind}:{t['id']}")] for t in list_terms()]
++    buttons.append(_back())
++    await _edit(query, "کدام ترم؟", InlineKeyboardMarkup(buttons))
++
++
++async def cb_browse_term(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    _, kind, tid = query.data.split(":")
++    await query.answer()
++    courses = list_courses_with_counts(int(tid), kind)
++    buttons = [[InlineKeyboardButton(f"{c['name']} ({c['n']})" if c["n"] else c["name"],
++                                     callback_data=f"mkb_c:{kind}:{c['id']}:0")] for c in courses]
++    buttons.append(_back(f"mk_browse:{kind}"))
++    await _edit(query, "کدام درس؟" if courses else "این ترم هنوز درسی ندارد.", InlineKeyboardMarkup(buttons))
++
++
++async def cb_browse_course(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    _, kind, cid, page = query.data.split(":")
++    cid, page = int(cid), max(0, int(page))
++    course = dbmod.get_course_by_id(cid)
++    if not course:
++        await query.answer("این درس دیگر پیدا نشد.", show_alert=True)
++        return
++    await query.answer()
++    total, rows = browse(kind, cid, page * PAGE_SIZE, PAGE_SIZE)
++    buttons = []
++    for l in rows:
++        p = price_label(l)
++        label = f"{type_label(kind, l['deal_type']).split(' ')[0]} {l['title']}" + (f" — {p}" if p else "")
++        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"mk_v:{l['id']}")])
++    nav = []
++    if page > 0:
++        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"mkb_c:{kind}:{cid}:{page - 1}"))
++    if (page + 1) * PAGE_SIZE < total:
++        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"mkb_c:{kind}:{cid}:{page + 1}"))
++    if nav:
++        buttons.append(nav)
++    term = _row("SELECT term_id FROM courses WHERE id = ?", (cid,))
++    buttons.append(_back(f"mkb_t:{kind}:{term['term_id']}" if term else f"mk_browse:{kind}"))
++    title = "📖 آگهی‌ها" if kind == KIND_AD else "🔎 درخواست‌ها"
++    await _edit(query, f"{title} — {course['term_name']} › {course['name']}" if rows else
++                f"{title} — {course['term_name']} › {course['name']}\n\nفعلاً موردی ثبت نشده است.",
++                InlineKeyboardMarkup(buttons))
++
++
++# ============================================================
++# نمایشِ یک آگهی/درخواست + مدیریتِ وضعیت (فقط صاحب)
++# ============================================================
++
++def _view_markup(l: dict, user_id: int) -> InlineKeyboardMarkup:
++    buttons = []
++    if l["owner_id"] == user_id:
++        row = []
++        for s in STATUSES:
++            if s != l["status"]:
++                row.append(InlineKeyboardButton(status_label(l["kind"], s), callback_data=f"mk_st:{l['id']}:{_ST_SHORT_REV[s]}"))
++        for i in range(0, len(row), 2):
++            buttons.append(row[i:i + 2])
++        buttons.append([InlineKeyboardButton("💬 گفت‌وگوهای این مورد", callback_data=f"mk_lc:{l['id']}")])
++        buttons.append(_back(f"mk_mine:{l['kind']}"))
++    else:
++        if l["status"] in ACTIVE_STATUSES:
++            label = "💬 پیام به آگهی‌دهنده" if l["kind"] == KIND_AD else "🙋 این منبع را دارم"
++            buttons.append([InlineKeyboardButton(label, callback_data=f"mk_contact:{l['id']}")])
++        buttons.append([InlineKeyboardButton("🚩 گزارش تخلف", callback_data=f"mkr_l:{l['id']}")])
++        buttons.append(_back(f"mkb_c:{l['kind']}:{l['course_id']}:0"))
++    return InlineKeyboardMarkup(buttons)
++
++
++async def cb_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    l = get_listing(int(query.data.split(":", 1)[1]))
++    if not l or (l["owner_id"] != user_id and l["status"] not in ACTIVE_STATUSES):
++        await query.answer("این مورد دیگر فعال نیست.", show_alert=True)
++        return
++    await query.answer()
++    await _show_listing(query, l, user_id)
++
++
++async def cb_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    _, lid, short = query.data.split(":")
++    status = _ST_SHORT.get(short)
++    if not status or not set_listing_status(int(lid), user_id, status):
++        await query.answer("این کار فقط برای صاحبِ آگهی ممکن است.", show_alert=True)
++        return
++    await query.answer("وضعیت تغییر کرد ✅")
++    await _show_listing(query, get_listing(int(lid)), user_id)
++
++
++async def cb_mine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    kind = query.data.split(":", 1)[1]
++    await query.answer()
++    rows = user_listings(update.effective_user.id, kind)
++    buttons = [[InlineKeyboardButton(f"{status_label(kind, l['status']).split(' ')[0]} {l['title']}"[:60],
++                                     callback_data=f"mk_v:{l['id']}")] for l in rows]
++    buttons.append(_back())
++    await _edit(query, ("🗂 آگهی‌های من" if kind == KIND_AD else "🗂 درخواست‌های من") if rows else "هنوز چیزی ثبت نکرده‌ای.",
++                InlineKeyboardMarkup(buttons))
++
++
++# ============================================================
++# ثبت آگهی/درخواست (ویزارد)
++# ============================================================
++
++async def cb_new_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    kind = query.data.split(":", 1)[1]
++    if kind not in (KIND_AD, KIND_REQ):
++        await query.answer()
++        return
++    if count_active(user_id, kind) >= MAX_ACTIVE_PER_KIND:
++        await query.answer(f"حداکثر {MAX_ACTIVE_PER_KIND} مورد فعال می‌توانی داشته باشی؛ یکی را ببند یا «واگذارشده» کن.", show_alert=True)
++        return
++    await query.answer()
++    clear_state(context)
++    context.user_data["mk_new"] = {"kind": kind, "step": "type"}
++    types = AD_TYPES if kind == KIND_AD else REQ_TYPES
++    buttons = [[InlineKeyboardButton(lbl, callback_data=f"mkn_d:{k}")] for k, lbl in types.items()]
++    buttons.append([InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")])
++    await _edit(query, "نوعش چیست؟", InlineKeyboardMarkup(buttons))
++
++
++def _wiz(context: ContextTypes.DEFAULT_TYPE, step: str):
++    w = context.user_data.get("mk_new")
++    return w if w and w.get("step") == step else None
++
++
++async def cb_new_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    context.user_data.pop("mk_new", None)
++    await update.callback_query.answer("لغو شد.")
++    await _edit(update.callback_query, ROOT_TEXT, _root_markup())
++
++
++async def cb_new_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    w = _wiz(context, "type")
++    key = query.data.split(":", 1)[1]
++    if not w or key not in (AD_TYPES if w["kind"] == KIND_AD else REQ_TYPES):
++        await query.answer("منقضی شد؛ دوباره شروع کن.", show_alert=True)
++        return
++    await query.answer()
++    w["deal_type"], w["step"] = key, "term"
++    buttons = [[InlineKeyboardButton(f"{t['grp']} › {t['name']}", callback_data=f"mkn_t:{t['id']}")] for t in list_terms()]
++    buttons.append([InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")])
++    await _edit(query, "مربوط به کدام ترم؟", InlineKeyboardMarkup(buttons))
++
++
++async def cb_new_term(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    w = _wiz(context, "term")
++    if not w:
++        await query.answer("منقضی شد؛ دوباره شروع کن.", show_alert=True)
++        return
++    tid = int(query.data.split(":", 1)[1])
++    term = _row("SELECT id, name FROM terms WHERE id = ?", (tid,))
++    courses = list_courses_with_counts(tid)
++    if not term or not courses:
++        await query.answer("این ترم درسی ندارد.", show_alert=True)
++        return
++    await query.answer()
++    w["term_name"], w["step"] = term["name"], "course"
++    buttons = [[InlineKeyboardButton(c["name"], callback_data=f"mkn_c:{c['id']}")] for c in courses]
++    buttons.append([InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")])
++    await _edit(query, "کدام درس؟", InlineKeyboardMarkup(buttons))
++
++
++async def cb_new_course(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    w = _wiz(context, "course")
++    course = dbmod.get_course_by_id(int(query.data.split(":", 1)[1])) if w else None
++    if not w or not course or course["term_name"] != w["term_name"]:
++        await query.answer("منقضی شد؛ دوباره شروع کن.", show_alert=True)
++        return
++    await query.answer()
++    w["course_id"], w["course_name"], w["step"] = course["id"], course["name"], "teacher"
++    await _edit(query, f"نام استاد را بنویس (اختیاری)، یا «-» بفرست.\n(حداکثر {TEACHER_MAX} نویسه)",
++                InlineKeyboardMarkup([[InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")]]))
++
++
++async def cb_new_condition(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    w = _wiz(context, "condition")
++    key = query.data.split(":", 1)[1]
++    if not w or key not in CONDITIONS:
++        await query.answer("منقضی شد؛ دوباره شروع کن.", show_alert=True)
++        return
++    await query.answer()
++    w["condition"] = key
++    if w["deal_type"] == "sell":
++        w["step"] = "price"
++        await _edit(query, "قیمت را به تومان بنویس (فقط عدد)، یا «-» برای «توافقی».",
++                    InlineKeyboardMarkup([[InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")]]))
++    else:
++        w["step"] = "desc"
++        await _edit(query, f"توضیحات را بنویس (حداکثر {DESC_MAX} نویسه)، یا «-».",
++                    InlineKeyboardMarkup([[InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")]]))
++
++
++async def _wizard_text(update: Update, context: ContextTypes.DEFAULT_TYPE, w: dict, text: str) -> bool:
++    msg = update.message
++    step = w["step"]
++    if step == "teacher":
++        if len(text) > TEACHER_MAX:
++            await msg.reply_text(f"حداکثر {TEACHER_MAX} نویسه؛ دوباره بفرست (یا «-»).")
++            return True
++        w["teacher"] = "" if text == "-" else text
++        w["step"] = "title"
++        await msg.reply_text(f"عنوانِ {'آگهی' if w['kind'] == KIND_AD else 'درخواست'} را بنویس (مثلاً «جزوه‌ی بیوشیمی دکتر X»).")
++        return True
++    if step == "title":
++        if not text or len(text) > TITLE_MAX:
++            await msg.reply_text(f"عنوان باید خالی نباشد و حداکثر {TITLE_MAX} نویسه باشد.")
++            return True
++        w["title"] = text
++        if w["kind"] == KIND_AD:
++            w["step"] = "condition"
++            buttons = [[InlineKeyboardButton(lbl, callback_data=f"mkn_s:{k}")] for k, lbl in CONDITIONS.items()]
++            buttons.append([InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")])
++            await msg.reply_text("وضعیتِ منبع؟", reply_markup=InlineKeyboardMarkup(buttons))
++        else:
++            w["step"] = "desc"
++            await msg.reply_text(f"توضیحات را بنویس (حداکثر {DESC_MAX} نویسه)، یا «-».")
++        return True
++    if step == "price":
++        if text == "-":
++            w["price"] = None
++        else:
++            digits = _norm_digits(text).replace(",", "").replace("٬", "").strip()
++            if not digits.isdigit() or not (0 < int(digits) <= PRICE_MAX):
++                await msg.reply_text("قیمت را فقط به‌صورت عدد (تومان) بنویس، یا «-» برای توافقی.")
++                return True
++            w["price"] = int(digits)
++        w["step"] = "desc"
++        await msg.reply_text(f"توضیحات را بنویس (حداکثر {DESC_MAX} نویسه)، یا «-».")
++        return True
++    if step == "desc":
++        if len(text) > DESC_MAX or not text:
++            await msg.reply_text(f"حداکثر {DESC_MAX} نویسه؛ دوباره بفرست (یا «-»).")
++            return True
++        w["desc"] = "" if text == "-" else text
++        w["step"] = "photo"
++        await msg.reply_text(
++            "📷 اگر عکسی از منبع داری بفرست (اختیاری)، وگرنه دکمه‌ی زیر را بزن.",
++            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭ بدون عکس", callback_data="mkn_nophoto")],
++                                               [InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")]]),
++        )
++        return True
++    await msg.reply_text("لطفاً از دکمه‌های همین مرحله استفاده کن (یا «✖️ انصراف»).")
++    return True
++
++
++async def _wizard_preview(message, w: dict) -> None:
++    w["step"] = "ready"
++    w["nonce"] = secrets.token_hex(4)
++    preview = dict(w, code="(بعد از ثبت)", status="available", owner_id=0, description=w.get("desc", ""),
++                   photo_file_id=w.get("photo"))
++    await message.reply_text(
++        "پیش‌نمایش:\n\n" + listing_text(preview) + "\n\nثبت شود؟",
++        reply_markup=InlineKeyboardMarkup([
++            [InlineKeyboardButton("✅ ثبت", callback_data=f"mkn_ok:{w['nonce']}")],
++            [InlineKeyboardButton("✖️ انصراف", callback_data="mkn_cancel")],
++        ]),
++    )
++
++
++async def cb_new_nophoto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    w = _wiz(context, "photo")
++    if not w:
++        await query.answer("منقضی شد؛ دوباره شروع کن.", show_alert=True)
++        return
++    await query.answer()
++    w["photo"] = None
++    await _wizard_preview(query.message, w)
++
++
++async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """فقط وقتی کاربر در مرحله‌ی «عکس» ویزارد است عکس را می‌گیرد؛ در غیر این صورت هیچ کاری نمی‌کند
++    و هندلرهای قبلیِ ربات (receive_file) دست‌نخورده کار می‌کنند."""
++    w = context.user_data.get("mk_new")
++    if not (w and w.get("step") == "photo") or not update.message or not update.message.photo:
++        return
++    w["photo"] = update.message.photo[-1].file_id
++    await _wizard_preview(update.message, w)
++    raise ApplicationHandlerStop
++
++
++async def cb_new_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    w = context.user_data.get("mk_new")
++    if not w or w.get("step") != "ready" or w.get("nonce") != query.data.split(":", 1)[1]:
++        await query.answer("این پیش‌نمایش دیگر معتبر نیست.", show_alert=True)
++        return
++    context.user_data.pop("mk_new", None)  # یک‌بارمصرف: دابل‌تپ آگهی تکراری نمی‌سازد
++    if count_active(user_id, w["kind"]) >= MAX_ACTIVE_PER_KIND:
++        await query.answer("به سقفِ موردهای فعال رسیده‌ای.", show_alert=True)
++        return
++    try:
++        listing_id, code = create_listing(w, user_id)
++    except Exception:
++        logger.exception("ثبتِ آگهی ناموفق بود (user=%s)", user_id)
++        await query.answer("مشکلی پیش اومد؛ دوباره امتحان کن 🙏", show_alert=True)
++        return
++    await query.answer("ثبت شد ✅")
++    await _edit(query, f"✅ ثبت شد. کد: {code}\nاز «🗂 آگهی‌ها/درخواست‌های من» می‌توانی وضعیتش را مدیریت کنی.",
++                InlineKeyboardMarkup([[InlineKeyboardButton("📄 دیدنِ آن", callback_data=f"mk_v:{listing_id}")], _back()]))
++
++
++# ============================================================
++# شروعِ گفت‌وگو: جمله‌ی قصد → پذیرش/رد → رله
++# ============================================================
++
++async def cb_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    l = get_listing(int(query.data.split(":", 1)[1]))
++    if not l or l["status"] not in ACTIVE_STATUSES:
++        await query.answer("این مورد دیگر فعال نیست.", show_alert=True)
++        return
++    if l["owner_id"] == user_id:
++        await query.answer("این مورد برای خودت است.", show_alert=True)
++        return
++    existing = find_chat(l["id"], user_id)
++    if existing and existing["status"] == "pending":
++        await query.answer("درخواستت قبلاً ثبت شده؛ منتظر پاسخ بمان.", show_alert=True)
++        return
++    if existing and existing["status"] == "active":
++        await query.answer("گفت‌وگو فعال است؛ از «💬 گفت‌وگوهای من» واردش شو.", show_alert=True)
++        return
++    if existing and existing["status"] == "rejected":
++        await query.answer("درخواستِ قبلی‌ات پذیرفته نشد.", show_alert=True)
++        return
++    await query.answer()
++    clear_state(context)
++    context.user_data["mk_intent"] = {"listing_id": l["id"]}
++    await query.message.reply_text(
++        "قبل از شروعِ گفت‌وگو، در یک جمله بنویس چرا پیام می‌دهی و قصدت چیست "
++        f"(مثلاً «می‌خوام بخرمش، فردا می‌تونم تحویل بگیرم»). حداکثر {INTENT_MAX} نویسه.",
++        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖️ انصراف", callback_data="mk_intent_cancel")]]),
++    )
++
++
++async def cb_intent_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    context.user_data.pop("mk_intent", None)
++    await update.callback_query.answer("لغو شد.")
++    await _edit(update.callback_query, "لغو شد.")
++
++
++async def _notify(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str, markup=None) -> bool:
++    try:
++        await context.bot.send_message(chat_id=user_id, text=text, reply_markup=markup, disable_web_page_preview=True)
++        return True
++    except (Forbidden, TelegramError):
++        return False
++
++
++async def _submit_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
++    st = context.user_data.get("mk_intent")
++    user_id = update.effective_user.id
++    if not text or len(text) > INTENT_MAX:
++        await update.message.reply_text(f"باید خالی نباشد و حداکثر {INTENT_MAX} نویسه باشد.")
++        return True
++    context.user_data.pop("mk_intent", None)
++    l = get_listing(st["listing_id"])
++    if not l or l["status"] not in ACTIVE_STATUSES or l["owner_id"] == user_id:
++        await update.message.reply_text("این مورد دیگر فعال نیست.")
++        return True
++    chat_id = upsert_pending_chat(l, user_id, text)
++    if chat_id < 0:
++        await update.message.reply_text("برای این مورد قبلاً درخواست داده‌ای.")
++        return True
++    delivered = await _notify(
++        context, l["owner_id"],
++        f"📨 درخواستِ گفت‌وگو برای «{l['title']}» ({l['code']})\n\nپیامِ طرف مقابل:\n«{text}»\n\nمی‌پذیری؟",
++        InlineKeyboardMarkup([[InlineKeyboardButton("✅ بپذیر", callback_data=f"mk_acc:{chat_id}"),
++                               InlineKeyboardButton("❌ رد", callback_data=f"mk_rej:{chat_id}")]]),
++    )
++    await update.message.reply_text(
++        "✅ درخواستت برای صاحبِ آن ارسال شد؛ اگر بپذیرد خبرت می‌کنم." if delivered
++        else "درخواستت ثبت شد، ولی الان امکانِ اطلاع‌رسانی به طرف مقابل نیست (ربات را بلاک کرده یا در دسترس نیست)."
++    )
++    return True
++
++
++def _chat_open_markup(chat_id: int) -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup([[InlineKeyboardButton("💬 ورود به گفت‌وگو", callback_data=f"mk_open:{chat_id}")]])
++
++
++async def cb_accept(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    chat = get_chat(int(query.data.split(":", 1)[1]))
++    if not chat or chat["owner_id"] != user_id or chat["status"] != "pending":
++        await query.answer("این درخواست دیگر قابل پاسخ نیست.", show_alert=True)
++        return
++    l = get_listing(chat["listing_id"])
++    await query.answer()
++    if l and l["kind"] == KIND_REQ:
++        # درخواست‌کننده پیش از آغازِ گفت‌وگو یک جمله برای تأییدِ قصدش می‌نویسد
++        clear_state(context)
++        context.user_data["mk_confirm"] = {"chat_id": chat["id"]}
++        await _edit(query, "برای تأیید، در یک جمله بنویس چه می‌خواهی (مثلاً «می‌خوام همین جزوه رو امانت بگیرم، تا آخر هفته برمی‌گردونم»).")
++        return
++    await _activate_chat(update, context, chat, "")
++    await _edit(query, "✅ پذیرفتی. حالا می‌توانید از طریق ربات پیام رد و بدل کنید.", _chat_open_markup(chat["id"]))
++
++
++async def _activate_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, chat: dict, confirm_text: str) -> None:
++    if not set_chat_status(chat["id"], "active", confirm_text, only_from=("pending",)):
++        return
++    l = get_listing(chat["listing_id"])
++    extra = f"\n\nپیامِ طرف مقابل:\n«{confirm_text}»" if confirm_text else ""
++    await _notify(context, chat["responder_id"],
++                  f"✅ درخواستت برای «{l['title']}» ({l['code']}) پذیرفته شد.{extra}", _chat_open_markup(chat["id"]))
++
++
++async def _submit_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
++    st = context.user_data.get("mk_confirm")
++    chat = get_chat(st["chat_id"]) if st else None
++    if not text or len(text) > INTENT_MAX:
++        await update.message.reply_text(f"باید خالی نباشد و حداکثر {INTENT_MAX} نویسه باشد.")
++        return True
++    context.user_data.pop("mk_confirm", None)
++    if not chat or chat["owner_id"] != update.effective_user.id or chat["status"] != "pending":
++        await update.message.reply_text("این درخواست دیگر قابل پاسخ نیست.")
++        return True
++    await _activate_chat(update, context, chat, text)
++    await update.message.reply_text("✅ پذیرفتی. از «💬 گفت‌وگوهای من» واردِ گفت‌وگو شو.", reply_markup=_chat_open_markup(chat["id"]))
++    return True
++
++
++async def cb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    chat = get_chat(int(query.data.split(":", 1)[1]))
++    if not chat or chat["owner_id"] != update.effective_user.id or not set_chat_status(chat["id"], "rejected", only_from=("pending",)):
++        await query.answer("این درخواست دیگر قابل پاسخ نیست.", show_alert=True)
++        return
++    await query.answer("رد شد.")
++    l = get_listing(chat["listing_id"])
++    await _edit(query, "❌ رد شد.")
++    await _notify(context, chat["responder_id"], f"متأسفانه درخواستت برای «{l['title']}» ({l['code']}) پذیرفته نشد.")
++
++
++# ============================================================
++# گفت‌وگوها
++# ============================================================
++
++def _role_label(chat: dict, user_id: int) -> str:
++    return "صاحبِ آگهی" if chat["owner_id"] == user_id else "پاسخ‌دهنده"
++
++
++async def cb_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    await query.answer()
++    chats = user_chats(user_id)
++    buttons = []
++    for c in chats:
++        if c["status"] == "pending":
++            tag = "⏳ منتظر پذیرش شما" if c["owner_id"] == user_id else "⏳ منتظر پاسخ"
++        else:
++            tag = "💬 فعال"
++        buttons.append([InlineKeyboardButton(f"{tag} — {c['title']}"[:60], callback_data=f"mk_cv:{c['id']}")])
++    buttons.append(_back())
++    await _edit(query, "💬 گفت‌وگوهای من" if chats else "گفت‌وگوی فعالی نداری.", InlineKeyboardMarkup(buttons))
++
++
++async def cb_listing_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    l = get_listing(int(query.data.split(":", 1)[1]))
++    if not l or l["owner_id"] != update.effective_user.id:
++        await query.answer("فقط برای صاحبِ آگهی.", show_alert=True)
++        return
++    await query.answer()
++    chats = listing_chats(l["id"])
++    buttons = [[InlineKeyboardButton(f"{'⏳ منتظر پذیرش شما' if c['status'] == 'pending' else '💬 فعال'} — #{c['id']}",
++                                     callback_data=f"mk_cv:{c['id']}")] for c in chats]
++    buttons.append(_back(f"mk_v:{l['id']}"))
++    await _edit(query, "گفت‌وگوهای این مورد:" if chats else "هنوز گفت‌وگویی ندارد.", InlineKeyboardMarkup(buttons))
++
++
++async def cb_chat_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    chat = get_chat(int(query.data.split(":", 1)[1]))
++    if not chat or user_id not in (chat["owner_id"], chat["responder_id"]):
++        await query.answer("پیدا نشد.", show_alert=True)
++        return
++    await query.answer()
++    l = get_listing(chat["listing_id"])
++    head = f"«{l['title']}» ({l['code']})\nنقشِ تو: {_role_label(chat, user_id)}\n"
++    if chat["status"] == "pending" and chat["owner_id"] == user_id:
++        await _edit(query, head + f"\nپیامِ طرف مقابل:\n«{chat['intent']}»",
++                    InlineKeyboardMarkup([[InlineKeyboardButton("✅ بپذیر", callback_data=f"mk_acc:{chat['id']}"),
++                                           InlineKeyboardButton("❌ رد", callback_data=f"mk_rej:{chat['id']}")], _back("mk_chats")]))
++    elif chat["status"] == "pending":
++        await _edit(query, head + "\nمنتظر پاسخِ طرف مقابل هستی.", InlineKeyboardMarkup([_back("mk_chats")]))
++    elif chat["status"] == "active":
++        await _edit(query, head + "\nگفت‌وگو فعال است.",
++                    InlineKeyboardMarkup([[InlineKeyboardButton("💬 ورود به گفت‌وگو", callback_data=f"mk_open:{chat['id']}")],
++                                          [InlineKeyboardButton("🏁 پایان گفت‌وگو", callback_data=f"mk_end:{chat['id']}")],
++                                          _back("mk_chats")]))
++    else:
++        await _edit(query, head + "\nاین گفت‌وگو بسته شده است.", InlineKeyboardMarkup([_back("mk_chats")]))
++
++
++async def cb_open_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    chat = get_chat(int(query.data.split(":", 1)[1]))
++    if not chat or user_id not in (chat["owner_id"], chat["responder_id"]) or chat["status"] != "active":
++        await query.answer("این گفت‌وگو فعال نیست.", show_alert=True)
++        return
++    await query.answer()
++    clear_state(context)
++    context.user_data["mchat"] = chat["id"]
++    l = get_listing(chat["listing_id"])
++    await query.message.reply_text(
++        f"💬 واردِ گفت‌وگو برای «{l['title']}» ({l['code']}) شدی.\n"
++        "هر متنی که بفرستی برای طرف مقابل می‌رود (نام و شماره‌ات نمایش داده نمی‌شود).\n"
++        "برای رفتن به بخش‌های دیگر، یکی از دکمه‌های منوی اصلی را بزن.",
++        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚪 خروج از گفت‌وگو", callback_data="mk_leave")],
++                                           [InlineKeyboardButton("🏁 پایان گفت‌وگو", callback_data=f"mk_end:{chat['id']}")]]),
++    )
++
++
++async def cb_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    context.user_data.pop("mchat", None)
++    await update.callback_query.answer("از گفت‌وگو خارج شدی.")
++    await _edit(update.callback_query, "از گفت‌وگو خارج شدی. هر وقت خواستی از «💬 گفت‌وگوهای من» برگرد.")
++
++
++async def cb_end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    chat = get_chat(int(query.data.split(":", 1)[1]))
++    if not chat or user_id not in (chat["owner_id"], chat["responder_id"]) or not set_chat_status(chat["id"], "ended", only_from=("active",)):
++        await query.answer("این گفت‌وگو فعال نیست.", show_alert=True)
++        return
++    context.user_data.pop("mchat", None)
++    await query.answer("گفت‌وگو پایان یافت.")
++    l = get_listing(chat["listing_id"])
++    await _edit(query, "🏁 گفت‌وگو پایان یافت.")
++    other = chat["responder_id"] if user_id == chat["owner_id"] else chat["owner_id"]
++    await _notify(context, other, f"🏁 طرف مقابل گفت‌وگو درباره‌ی «{l['title']}» ({l['code']}) را پایان داد.")
++
++
++def _rate_ok(user_id: int) -> bool:
++    now = time.monotonic()
++    times = [t for t in _msg_times.get(user_id, []) if now - t < MSG_RATE_WINDOW]
++    if len(times) >= MSG_RATE_LIMIT:
++        _msg_times[user_id] = times
++        return False
++    times.append(now)
++    _msg_times[user_id] = times
++    return True
++
++
++async def _relay(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
++    user_id = update.effective_user.id
++    chat = get_chat(context.user_data.get("mchat") or 0)
++    if not chat or user_id not in (chat["owner_id"], chat["responder_id"]) or chat["status"] != "active":
++        context.user_data.pop("mchat", None)
++        await update.message.reply_text("این گفت‌وگو دیگر فعال نیست.")
++        return True
++    if not text or len(text) > MSG_MAX:
++        await update.message.reply_text(f"پیام باید خالی نباشد و حداکثر {MSG_MAX} نویسه باشد.")
++        return True
++    if not _rate_ok(user_id):
++        await update.message.reply_text("⏳ خیلی سریع پیام می‌فرستی؛ کمی صبر کن.")
++        return True
++    l = get_listing(chat["listing_id"])
++    other = chat["responder_id"] if user_id == chat["owner_id"] else chat["owner_id"]
++    msg_id = add_message(chat["id"], user_id, text, delivered=False)
++    ok = await _notify(context, other, f"💬 «{l['title']}» ({l['code']})\n\n{text}",
++                       InlineKeyboardMarkup([[InlineKeyboardButton("💬 ورود به گفت‌وگو", callback_data=f"mk_open:{chat['id']}"),
++                                              InlineKeyboardButton("🚩 گزارش", callback_data=f"mkr_m:{msg_id}")]]))
++    if ok:
++        with dbmod.get_conn() as conn:
++            conn.execute("UPDATE market_messages SET delivered = 1 WHERE id = ?", (msg_id,))
++        await update.message.reply_text("✅ ارسال شد")
++    else:
++        await update.message.reply_text("⚠️ پیام ذخیره شد ولی الان به طرف مقابل نرسید (ربات را بلاک کرده یا در دسترس نیست).")
++    return True
++
++
++# ============================================================
++# 🚩 گزارش تخلف و بررسی
++# - دلیل ثبت می‌شود؛ گزارش به ناظرها (سوپرادمین + ادمین دارای مجوز market_moderate) می‌رود.
++# - هیچ آگهی‌ای فقط با دریافتِ گزارش خودکار حذف/بسته نمی‌شود؛ ناظر تصمیم می‌گیرد.
++# - هویتِ گزارش‌دهنده، صاحبِ آگهی و طرفِ گفت‌وگو به ناظر نمایش داده نمی‌شود.
++# ============================================================
++
++REPORT_REASONS = {
++    "irrelevant": "نامرتبط با بازارچه", "spam": "تبلیغ/اسپم", "personal": "درج اطلاعات شخصی",
++    "scam": "مشکوک به کلاه‌برداری", "abuse": "محتوای توهین‌آمیز", "other": "سایر",
++}
++REPORT_NOTE_MAX = 200
++REPORTS_PER_DAY = 10
++
++
++def is_moderator(user_id: int) -> bool:
++    return dbmod.has_admin_permission(user_id, "market_moderate")
++
++
++def moderator_ids() -> list:
++    ids = {a["user_id"] for a in dbmod.list_admins() if a["role"] == "SUPER_ADMIN"}
++    for uid, perm in dbmod.list_admin_permissions():
++        if perm == "market_moderate" and dbmod.get_admin_roles(uid):
++            ids.add(uid)
++    return sorted(ids)
++
++
++def reports_today(user_id: int) -> int:
++    since = (_dt.datetime.now() - _dt.timedelta(days=1)).isoformat(timespec="seconds")
++    return _row("SELECT COUNT(*) AS n FROM market_reports WHERE reporter_id = ? AND created_at >= ?", (user_id, since))["n"]
++
++
++def create_report(reporter_id: int, target_type: str, target_id: int, listing_id: int, chat_id, reason: str, note: str) -> int:
++    """شناسه‌ی گزارش؛ ۱- اگر همین کاربر قبلاً همین هدف را گزارش کرده (گزارشِ تکراری ساخته نمی‌شود)."""
++    with dbmod.get_conn() as conn:
++        try:
++            return conn.execute(
++                "INSERT INTO market_reports (reporter_id, target_type, target_id, listing_id, chat_id, reason, note, status, created_at) "
++                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)",
++                (reporter_id, target_type, target_id, listing_id, chat_id, reason, note, _now()),
++            ).lastrowid
++        except Exception as e:
++            if "UNIQUE" in str(e):
++                return -1
++            raise
++
++
++def get_report(report_id: int):
++    return _row("SELECT * FROM market_reports WHERE id = ?", (report_id,))
++
++
++def open_reports(limit: int = 15) -> list:
++    return _rows(
++        "SELECT r.id, r.reason, r.target_type, l.code FROM market_reports r JOIN market_listings l ON l.id = r.listing_id "
++        "WHERE r.status = 'open' ORDER BY r.id LIMIT ?", (limit,))
++
++
++def resolve_report(report_id: int, status: str, reviewer: int) -> bool:
++    with dbmod.get_conn() as conn:
++        return conn.execute(
++            "UPDATE market_reports SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'open'",
++            (status, reviewer, _now(), report_id),
++        ).rowcount > 0
++
++
++def listing_report_count(listing_id: int) -> int:
++    return _row("SELECT COUNT(*) AS n FROM market_reports WHERE listing_id = ?", (listing_id,))["n"]
++
++
++def moderator_close_listing(listing_id: int, reviewer: int) -> bool:
++    """بستنِ آگهی توسط ناظر (حذف نمی‌شود؛ فقط status=closed) و بستنِ گزارش‌های بازِ همان آگهی."""
++    now = _now()
++    with dbmod.get_conn() as conn:
++        ok = conn.execute("UPDATE market_listings SET status = 'closed', updated_at = ? WHERE id = ?", (now, listing_id)).rowcount > 0
++        conn.execute(
++            "UPDATE market_reports SET status = 'actioned', reviewed_by = ?, reviewed_at = ? WHERE listing_id = ? AND status = 'open'",
++            (reviewer, now, listing_id),
++        )
++    return ok
++
++
++async def cb_report_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    await query.answer()
++    await _edit(query,
++                "🚩 گزارش تخلف\n\nاگر آگهی یا پیامِ نامرتبط، تبلیغاتی یا مشکوکی دیدی:\n"
++                "• روی صفحه‌ی همان آگهی «🚩 گزارش تخلف» را بزن.\n"
++                "• برای یک پیامِ گفت‌وگو، زیرِ همان پیام «🚩 گزارش» را بزن.\n\n"
++                "گزارش‌ها را ناظرها بررسی می‌کنند؛ آگهی فقط با یک گزارش خودکار حذف نمی‌شود و هویتِ تو برای هیچ‌کس نمایش داده نمی‌شود.",
++                InlineKeyboardMarkup([_back()]))
++
++
++async def _start_report(update: Update, context: ContextTypes.DEFAULT_TYPE, rtype: str, target_id: int, listing: dict, chat_id) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    if reports_today(user_id) >= REPORTS_PER_DAY:
++        await query.answer("امروز به سقفِ تعدادِ گزارش رسیده‌ای.", show_alert=True)
++        return
++    exists = _row("SELECT 1 AS x FROM market_reports WHERE reporter_id = ? AND target_type = ? AND target_id = ?",
++                  (user_id, rtype, target_id))
++    if exists:
++        await query.answer("قبلاً این مورد را گزارش کرده‌ای؛ ممنون 🙏", show_alert=True)
++        return
++    await query.answer()
++    context.user_data["mk_report"] = {"type": rtype, "id": target_id, "listing_id": listing["id"], "chat_id": chat_id, "step": "reason"}
++    buttons = [[InlineKeyboardButton(lbl, callback_data=f"mkr_p:{k}")] for k, lbl in REPORT_REASONS.items()]
++    buttons.append([InlineKeyboardButton("✖️ انصراف", callback_data="mkr_cancel")])
++    await query.message.reply_text("دلیلِ گزارش چیست؟", reply_markup=InlineKeyboardMarkup(buttons))
++
++
++async def cb_report_listing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    l = get_listing(int(query.data.split(":", 1)[1]))
++    if not l or l["owner_id"] == update.effective_user.id:
++        await query.answer("این مورد قابل گزارش نیست.", show_alert=True)
++        return
++    await _start_report(update, context, "listing", l["id"], l, None)
++
++
++async def cb_report_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    user_id = update.effective_user.id
++    msg = _row("SELECT * FROM market_messages WHERE id = ?", (int(query.data.split(":", 1)[1]),))
++    chat = get_chat(msg["chat_id"]) if msg else None
++    if not msg or not chat or user_id not in (chat["owner_id"], chat["responder_id"]) or msg["sender_id"] == user_id:
++        await query.answer("این پیام قابل گزارش نیست.", show_alert=True)
++        return
++    await _start_report(update, context, "message", msg["id"], get_listing(chat["listing_id"]), chat["id"])
++
++
++async def cb_report_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    context.user_data.pop("mk_report", None)
++    await update.callback_query.answer("لغو شد.")
++    await _edit(update.callback_query, "لغو شد.")
++
++
++async def cb_report_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    query = update.callback_query
++    st = context.user_data.get("mk_report")
++    key = query.data.split(":", 1)[1]
++    if not st or st.get("step") != "reason" or key not in REPORT_REASONS:
++        await query.answer("منقضی شد؛ دوباره گزارش بده.", show_alert=True)
++        return
++    await query.answer()
++    st["reason"], st["step"] = key, "note"
++    await _edit(query, f"دلیل: {REPORT_REASONS[key]}\n\nیک توضیحِ کوتاه بنویس (حداکثر {REPORT_NOTE_MAX} نویسه)، یا «-».",
++                InlineKeyboardMarkup([[InlineKeyboardButton("✖️ انصراف", callback_data="mkr_cancel")]]))
++
++
++async def _report_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
++    st = context.user_data.get("mk_report")
++    user_id = update.effective_user.id
++    if st["step"] != "note":
++        await update.message.reply_text("لطفاً یکی از دلیل‌ها را با دکمه انتخاب کن (یا «✖️ انصراف»).")
++        return True
++    if len(text) > REPORT_NOTE_MAX or not text:
++        await update.message.reply_text(f"حداکثر {REPORT_NOTE_MAX} نویسه؛ دوباره بفرست (یا «-»).")
++        return True
++    context.user_data.pop("mk_report", None)
++    note = "" if text == "-" else text
++    rid = create_report(user_id, "listing" if st["type"] == "listing" else "message", st["id"], st["listing_id"],
++                        st["chat_id"], st["reason"], note)
++    if rid < 0:
++        await update.message.reply_text("قبلاً این مورد را گزارش کرده‌ای؛ ممنون 🙏")
++        return True
++    await update.message.reply_text("✅ گزارشت ثبت شد و ناظرها بررسی می‌کنند. ممنون که کمک می‌کنی بازارچه تمیز بماند.")
++    l = get_listing(st["listing_id"])
++    for mid in moderator_ids():
++        if mid == user_id:
++            continue
++        await _notify(context, mid, f"🚩 گزارشِ جدید #{rid}\nکدِ آگهی: {l['code']}\nدلیل: {REPORT_REASONS[st['reason']]}",
++                      InlineKeyboardMarkup([[InlineKeyboardButton("🔍 بررسی", callback_data=f"mkm_v:{rid}")]]))
++    return True
++
++
++def _mod_markup(r: dict) -> InlineKeyboardMarkup:
++    rows = []
++    if r["status"] == "open":
++        rows.append([InlineKeyboardButton("✅ رد گزارش (بدون اقدام)", callback_data=f"mkm_d:{r['id']}")])
++        rows.append([InlineKeyboardButton("⚫️ بستنِ آگهی", callback_data=f"mkm_c:{r['id']}")])
++        if r["target_type"] == "message" and r.get("chat_id"):
++            rows.append([InlineKeyboardButton("🏁 پایان‌دادن به گفت‌وگو", callback_data=f"mkm_e:{r['id']}")])
++    rows.append([InlineKeyboardButton("🔙 فهرستِ گزارش‌ها", callback_data="mkm_l")])
++    return InlineKeyboardMarkup(rows)
++
++
++def _mod_text(r: dict) -> str:
++    l = get_listing(r["listing_id"])
++    lines = [f"🚩 گزارش #{r['id']} — {'باز' if r['status'] == 'open' else ('بسته: ' + r['status'])}",
++             f"دلیل: {REPORT_REASONS.get(r['reason'], r['reason'])}"]
++    if r["note"]:
++        lines.append(f"توضیح گزارش‌دهنده: {r['note']}")
++    lines.append(f"تعداد کلِ گزارش‌های این آگهی: {listing_report_count(r['listing_id'])}")
++    if r["target_type"] == "message":
++        m = _row("SELECT text FROM market_messages WHERE id = ?", (r["target_id"],))
++        lines.append(f"\n💬 پیامِ گزارش‌شده:\n«{(m or {}).get('text', '—')}»")
++    lines.append("\n──────────────\n" + listing_text(l))
++    return "\n".join(lines)
++
++
++async def _mod_guard(update: Update, show: bool = True) -> bool:
++    if is_moderator(update.effective_user.id):
++        return True
++    if update.callback_query:
++        await update.callback_query.answer("⛔️ مجاز نیستید.", show_alert=True)
++    return False
++
++
++async def marketreports_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """/marketreports -- فهرستِ گزارش‌های باز (ناظرها)."""
++    if not is_moderator(update.effective_user.id):
++        return
++    rows = open_reports()
++    buttons = [[InlineKeyboardButton(f"#{r['id']} — {REPORT_REASONS.get(r['reason'], r['reason'])} — {r['code']}",
++                                     callback_data=f"mkm_v:{r['id']}")] for r in rows]
++    await update.message.reply_text("🚩 گزارش‌های باز:" if rows else "گزارشِ بازی وجود ندارد. ✅",
++                                    reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
++
++
++async def cb_mod_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    if not await _mod_guard(update):
++        return
++    query = update.callback_query
++    await query.answer()
++    rows = open_reports()
++    buttons = [[InlineKeyboardButton(f"#{r['id']} — {REPORT_REASONS.get(r['reason'], r['reason'])} — {r['code']}",
++                                     callback_data=f"mkm_v:{r['id']}")] for r in rows]
++    await _edit(query, "🚩 گزارش‌های باز:" if rows else "گزارشِ بازی وجود ندارد. ✅", InlineKeyboardMarkup(buttons) if buttons else None)
++
++
++async def cb_mod_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    if not await _mod_guard(update):
++        return
++    query = update.callback_query
++    r = get_report(int(query.data.split(":", 1)[1]))
++    if not r:
++        await query.answer("پیدا نشد.", show_alert=True)
++        return
++    await query.answer()
++    await _edit(query, _mod_text(r)[:4000], _mod_markup(r))
++
++
++async def cb_mod_dismiss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    if not await _mod_guard(update):
++        return
++    query = update.callback_query
++    r = get_report(int(query.data.split(":", 1)[1]))
++    if not r or not resolve_report(r["id"], "dismissed", update.effective_user.id):
++        await query.answer("این گزارش قبلاً بررسی شده.", show_alert=True)
++        return
++    await query.answer("گزارش رد شد (بدون اقدام).")
++    await _notify(context, r["reporter_id"], "✅ گزارشت بررسی شد. ممنون از دقتت.")
++    await _edit(query, _mod_text(get_report(r["id"]))[:4000], _mod_markup(get_report(r["id"])))
++
++
++async def cb_mod_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    if not await _mod_guard(update):
++        return
++    query = update.callback_query
++    r = get_report(int(query.data.split(":", 1)[1]))
++    if not r or r["status"] != "open":
++        await query.answer("این گزارش قبلاً بررسی شده.", show_alert=True)
++        return
++    l = get_listing(r["listing_id"])
++    moderator_close_listing(r["listing_id"], update.effective_user.id)
++    await query.answer("آگهی بسته شد.")
++    await _notify(context, l["owner_id"], f"⚫️ «{l['title']}» ({l['code']}) توسط ناظر بسته شد چون با قوانینِ بازارچه نمی‌خواند. "
++                                         "اگر فکر می‌کنی اشتباه شده، دوباره با اصلاحِ متن آگهی بگذار.")
++    await _notify(context, r["reporter_id"], "✅ گزارشت بررسی شد و اقدام انجام شد. ممنون.")
++    await _edit(query, _mod_text(get_report(r["id"]))[:4000], _mod_markup(get_report(r["id"])))
++
++
++async def cb_mod_end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    if not await _mod_guard(update):
++        return
++    query = update.callback_query
++    r = get_report(int(query.data.split(":", 1)[1]))
++    chat = get_chat(r["chat_id"]) if r and r.get("chat_id") else None
++    if not r or r["status"] != "open" or not chat:
++        await query.answer("این مورد قابل اقدام نیست.", show_alert=True)
++        return
++    set_chat_status(chat["id"], "ended", only_from=("pending", "active"))
++    resolve_report(r["id"], "actioned", update.effective_user.id)
++    l = get_listing(chat["listing_id"])
++    for uid in (chat["owner_id"], chat["responder_id"]):
++        await _notify(context, uid, f"🏁 گفت‌وگو درباره‌ی «{l['title']}» ({l['code']}) توسط ناظر پایان یافت.")
++    await query.answer("گفت‌وگو پایان یافت.")
++    await _edit(query, _mod_text(get_report(r["id"]))[:4000], _mod_markup(get_report(r["id"])))
++
++
++
++STATE_KEYS = ("mk_new", "mk_intent", "mk_confirm", "mchat", "mk_report")
++
++
++def has_state(context: ContextTypes.DEFAULT_TYPE) -> bool:
++    return any(context.user_data.get(k) for k in STATE_KEYS)
++
++
++async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
++    """True یعنی پیام در بازارچه مصرف شد."""
++    ud = context.user_data
++    text = (update.message.text or "").strip()
++    if ud.get("mk_new"):
++        return await _wizard_text(update, context, ud["mk_new"], text)
++    if ud.get("mk_intent"):
++        return await _submit_intent(update, context, text)
++    if ud.get("mk_confirm"):
++        return await _submit_confirm(update, context, text)
++    if ud.get("mk_report"):
++        return await _report_text(update, context, text)
++    if ud.get("mchat"):
++        return await _relay(update, context, text)
++    return False
++
++
++def register(app: Application) -> None:
++    ensure_tables()
++    add = lambda fn, pat: app.add_handler(CallbackQueryHandler(fn, pattern=pat))
++    add(cb_root, r"^mk_root$")
++    add(cb_browse, r"^mk_browse:(ad|request)$")
++    add(cb_browse_term, r"^mkb_t:(ad|request):\d+$")
++    add(cb_browse_course, r"^mkb_c:(ad|request):\d+:\d+$")
++    add(cb_view, r"^mk_v:\d+$")
++    add(cb_set_status, r"^mk_st:\d+:[agnc]$")
++    add(cb_mine, r"^mk_mine:(ad|request)$")
++    add(cb_new_start, r"^mk_new:(ad|request)$")
++    add(cb_new_cancel, r"^mkn_cancel$")
++    add(cb_new_type, r"^mkn_d:[a-z]+$")
++    add(cb_new_term, r"^mkn_t:\d+$")
++    add(cb_new_course, r"^mkn_c:\d+$")
++    add(cb_new_condition, r"^mkn_s:[a-z_]+$")
++    add(cb_new_confirm, r"^mkn_ok:[0-9a-f]+$")
++    add(cb_contact, r"^mk_contact:\d+$")
++    add(cb_intent_cancel, r"^mk_intent_cancel$")
++    add(cb_accept, r"^mk_acc:\d+$")
++    add(cb_reject, r"^mk_rej:\d+$")
++    add(cb_chats, r"^mk_chats$")
++    add(cb_listing_chats, r"^mk_lc:\d+$")
++    add(cb_chat_view, r"^mk_cv:\d+$")
++    add(cb_open_chat, r"^mk_open:\d+$")
++    add(cb_leave, r"^mk_leave$")
++    add(cb_end_chat, r"^mk_end:\d+$")
++    add(cb_new_nophoto, r"^mkn_nophoto$")
++    add(cb_report_info, r"^mk_report_info$")
++    add(cb_report_listing, r"^mkr_l:\d+$")
++    add(cb_report_message, r"^mkr_m:\d+$")
++    add(cb_report_reason, r"^mkr_p:[a-z]+$")
++    add(cb_report_cancel, r"^mkr_cancel$")
++    add(cb_mod_list, r"^mkm_l$")
++    add(cb_mod_view, r"^mkm_v:\d+$")
++    add(cb_mod_dismiss, r"^mkm_d:\d+$")
++    add(cb_mod_close, r"^mkm_c:\d+$")
++    add(cb_mod_end_chat, r"^mkm_e:\d+$")
++    app.add_handler(CommandHandler("marketreports", marketreports_command))
++    # group=-3: فقط در مرحله‌ی «عکس» ویزارد عمل می‌کند و در غیر این صورت بقیه‌ی هندلرها دست‌نخورده‌اند
++    app.add_handler(MessageHandler(filters.PHOTO, photo_handler), group=-3)
